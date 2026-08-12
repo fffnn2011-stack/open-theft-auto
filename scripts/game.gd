@@ -128,6 +128,7 @@ const SPACECRAFT_MODEL_MIN_Y := -6.113062
 var world: CityWorld
 var camera: Camera3D
 var sun: DirectionalLight3D
+var moon: DirectionalLight3D   # cool fill from the anti-solar direction at night
 var env: Environment
 var sky_mat: ProceduralSkyMaterial
 var hud: HUD
@@ -149,6 +150,13 @@ var _near_stark := false         # on foot and within reach of the Stark lab kio
 var _near_realtor := false       # on foot and within reach of the realtor kiosk
 var _near_hospital := false      # on foot and within reach of the hospital kiosk
 var _near_ventures := false      # on foot and within reach of the Ventures HQ door
+var _near_island_kiosk := false  # on foot at the City Planning kiosk
+var _island_confirm_t := 0.0     # double-press window for the $500B island signing
+var _near_extractor := false     # on the Moon, at the He-3 extractor
+var _near_he3_buyer := false     # at the facility fuel depot
+var _he3_cooldown := 0.0         # extractor recharge between loads
+const HE3_LOAD_KG := 120.0       # one spacecraft hold's worth
+const HE3_COOLDOWN := 120.0      # seconds for the extractor to refill
 var _near_paddock := false       # in an F1 car at the Grand Prix paddock
 var in_trading_floor := false    # inside the exchange's glass trading office
 var _trading_return := Vector3.ZERO   # street position to drop back to on exit
@@ -260,6 +268,12 @@ const CRAFT_DESCENT_SPEED := 14.0     # max fall rate while hover-descending to 
 # President & motorcade
 var pres_state := "home"         # home / toairport / atairport / tohome / athome
 var pres_timer := 75.0           # countdown to the next motorcade run
+var _seizure_t := 8.0            # countdown to the next 5-star asset-seizure pulse
+var _stocks_frozen := false      # tracks the 4-star account freeze, for the toasts
+var _last_killer := ""           # bullet source that last hurt the player —
+								 # "rival:NAME" routes death-cash to that tycoon
+var camera_fpv := false          # driver (first-person) view in vehicles
+var _fpv_hidden: Array = []      # nodes hidden for the driver cam, to restore
 var president = null             # the President entity dict (also in `vips`)
 var pres_aggro := false          # the detail has been provoked
 var convoy_prog := 0.0           # distance the motorcade has covered along its route
@@ -321,6 +335,9 @@ func _ready() -> void:
 	camera = Camera3D.new()
 	camera.fov = 70.0
 	camera.position = Vector3(0, 8, 12)
+	# Far enough to see the space-vista planet spheres (Earth ball bottom at
+	# -8400, Moon ball at 17000) from anywhere on the orbit legs.
+	camera.far = 30000.0
 	camera.current = true
 	add_child(camera)
 
@@ -399,6 +416,10 @@ func _setup_environment() -> void:
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_energy = 0.6
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_exposure = 0.9
+	env.ssao_enabled = true
+	env.ssao_radius = 1.6
+	env.ssao_intensity = 1.5
 	env.fog_enabled = true
 	# A touch heavier than stock for the warm LA smog-haze on distant blocks,
 	# but kept light enough that aerial / flying views stay readable.
@@ -414,6 +435,14 @@ func _setup_environment() -> void:
 	sun.light_color = Color(1.0, 0.94, 0.82)   # warm California sunlight
 	sun.rotation = Vector3(deg_to_rad(-55.0), 0.7, 0.0)
 	add_child(sun)
+	# The moon — a shadowless cool directional fill that fades in as the sun
+	# sets, so night scenes read as moonlit blue instead of pitch black
+	# (_update_daynight drives its energy and keeps it opposite the sun).
+	moon = DirectionalLight3D.new()
+	moon.shadow_enabled = false
+	moon.light_energy = 0.0
+	moon.light_color = Color(0.62, 0.70, 0.98)
+	add_child(moon)
 
 
 # =====================================================================
@@ -448,10 +477,11 @@ func _on_start() -> void:
 	player_pos = Vector3(s.x, 0, s.y)
 	player_node.position = player_pos
 	player_node.visible = true
-	_spawn_vehicles(40)
+	# Densities scaled for the expanded 13x13 grid (was 40/40 on 11x11).
+	_spawn_vehicles(54)
 	_spawn_airport_aircraft()
 	_spawn_boats()
-	for i in 40:
+	for i in 54:
 		_spawn_npc()
 	_spawn_vip_groups(VIP_TARGET)
 	_spawn_iron_suit()
@@ -488,6 +518,10 @@ func _on_start() -> void:
 		SaveGame.load_into()
 		_refresh_weapon_model()
 		_refresh_suit_model()    # pad suit was built at tier 1 before the load
+	# Island stage comes from the save (or 0 on a fresh run) — sync the world.
+	world.set_island_stage(GameState.island_stage)
+	# Rivals walk the city — spawned AFTER the load so the assassinated stay dead.
+	_spawn_forbes_rivals()
 	hud.enter_game()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_show_objective("Rich VIPs roam the city - rob them for cash. An IRON MAN SUIT stands nearby, ready to fly. Downtown is the place to spend: STOCK EXCHANGE, FREE HARBOR AUTOS (cars), STARK INDUSTRIES (suit upgrades), FREE HARBOR REALTY (safehouses), the HOSPITAL (donate) and ANGEL VENTURES HQ (invest).", 11.0)
@@ -495,7 +529,21 @@ func _on_start() -> void:
 
 func _die() -> void:
 	GameState.paused = true
-	GameState.money = max(0, GameState.money - (10 + randi() % 6))
+	# Death drops your LIQUID wealth — every dollar of pocket cash, never
+	# assets (cars, property, suits, stocks and ventures all survive you).
+	# If a rival's security put you down, that tycoon inherits the money and
+	# it shows up on the Forbes board.
+	var lost: int = GameState.money
+	GameState.money = 0
+	if lost > 0:
+		if _last_killer.begins_with("rival:"):
+			var rname := _last_killer.substr(6)
+			Forbes.absorb_player_cash(rname, float(lost))
+			_show_objective("%s took your $%s in cash." % [rname, Forbes.commas(lost)], 9.0)
+		else:
+			_show_objective("Your $%s in cash was looted where you fell." % Forbes.commas(lost), 9.0)
+	elif GameState.bank_balance > 0:
+		_show_objective("You lost no pocket cash. Your $%s insured reserve is safe." % Forbes.commas(GameState.bank_balance), 7.0)
 	# A mid-celebration death would otherwise leave a crowd cheering an empty
 	# spot after the respawn teleport — just drop it, it's purely cosmetic.
 	_clear_celebration()
@@ -507,6 +555,7 @@ func _respawn() -> void:
 	hud.hide_death()
 	GameState.paused = false
 	GameState.wanted = 0.0
+	_last_killer = ""
 	# Drop out of any space leg cleanly — sky and gravity back to normal.
 	if space_state != "":
 		space_state = ""
@@ -582,6 +631,7 @@ func _respawn() -> void:
 const DISCRETE_ACTIONS := [
 	"interact", "enter_exit", "summon_suit", "phone", "mute",
 	"restock_respawn", "race_terminal", "weapon_next", "weapon_prev", "melee",
+	"camera_view",
 ]
 
 func _input(event: InputEvent) -> void:
@@ -704,6 +754,18 @@ func _handle_action(name: String) -> void:
 				_open_donate()
 			elif _near_ventures:
 				_open_ventures()
+			elif _near_island_kiosk:
+				_island_kiosk_interact()
+			elif _near_extractor or (_on_moon_surface() and _extractor_dist() < 22.0):
+				_load_he3()
+			elif _near_he3_buyer:
+				_sell_he3()
+		"camera_view":
+			if in_car != null:
+				camera_fpv = not camera_fpv
+				if not camera_fpv:
+					_fpv_restore()
+				_show_objective("DRIVER VIEW" if camera_fpv else "CHASE VIEW", 2.0)
 		"race_terminal":
 			if not terminal_open and _near_paddock and not RaceManager.is_active():
 				_open_race_terminal()
@@ -976,7 +1038,199 @@ func _on_suit_purchased() -> void:
 ## Drop the player's owned car `catalog_idx` onto the dealership lot. The
 ## previous lot car (if still parked and not being driven) is cleared first so
 ## owned spawns never pile up.
+## Hide the driven vehicle's meshes for the first-person driver cam (the
+## shuttle's still-attached stages ride along too).
+func _fpv_hide(v: Dictionary) -> void:
+	var nodes: Array = [v.node]
+	if v.get("is_rocket", false):
+		if not v.get("separated", true):
+			nodes.append(v.booster)
+		if not v.get("tank_separated", true):
+			nodes.append(v.tank_node)
+	for n in nodes:
+		if is_instance_valid(n) and not _fpv_hidden.has(n):
+			n.visible = false
+			_fpv_hidden.append(n)
+
+
+## Restore everything the driver cam hid — safe to call every frame.
+func _fpv_restore() -> void:
+	if _fpv_hidden.is_empty():
+		return
+	for n in _fpv_hidden:
+		if is_instance_valid(n):
+			n.visible = true
+	_fpv_hidden.clear()
+
+
+## True while the player is on the lunar surface (walk, mine, buggy).
+## Includes "moon_landed" so a just-touched-down craft exit still counts.
+func _on_moon_surface() -> bool:
+	return space_state == "moon" or space_state == "moon_landed"
+
+
+func _extractor_dist() -> float:
+	return Vector2(CityWorld.MOON_PAD.x + CityWorld.HE3_EXTRACTOR.x - player_pos.x,
+		CityWorld.MOON_PAD.z + CityWorld.HE3_EXTRACTOR.z - player_pos.z).length()
+
+
+## Landed spacecraft on the Moon that can take a He-3 load.
+func _moon_landed_spacecraft() -> Variant:
+	var ex := Vector2(CityWorld.MOON_PAD.x + CityWorld.HE3_EXTRACTOR.x,
+		CityWorld.MOON_PAD.z + CityWorld.HE3_EXTRACTOR.z)
+	var best = null
+	var best_d := INF
+	for v in vehicles:
+		if not v.get("is_spacecraft", false):
+			continue
+		if v.get("leg", "") != "moon":
+			continue
+		# Accept landed or on_ground; also tolerate a craft still settling.
+		var phase: String = str(v.get("phase", ""))
+		if phase != "landed" and not v.get("on_ground", false):
+			continue
+		var d: float = Vector2(v.pos.x - ex.x, v.pos.z - ex.y).length()
+		if d < best_d:
+			best_d = d
+			best = v
+	return best
+
+
+## Load He-3 into the spacecraft's hold — needs a landed craft on the Moon,
+## an empty-enough hold, and a recharged extractor. Always shows why it failed.
+func _load_he3() -> void:
+	var craft = _moon_landed_spacecraft()
+	if craft == null:
+		# Helpful split: is there ANY spacecraft on the moon leg vs none at all.
+		var any_moon_craft := false
+		var any_craft_phase := ""
+		for v in vehicles:
+			if v.get("is_spacecraft", false) and v.get("leg", "") == "moon":
+				any_moon_craft = true
+				any_craft_phase = str(v.get("phase", "?"))
+				break
+		if not any_moon_craft:
+			_show_objective("No spacecraft on the Moon — land the craft here, then PRESS E.", 6.0)
+		else:
+			_show_objective("Spacecraft must be fully LANDED (not hovering). Phase: %s — set it down, then PRESS E."
+				% any_craft_phase, 7.0)
+		return
+	var ex_pos := Vector2(CityWorld.MOON_PAD.x + CityWorld.HE3_EXTRACTOR.x,
+		CityWorld.MOON_PAD.z + CityWorld.HE3_EXTRACTOR.z)
+	var craft_d: float = Vector2(craft.pos.x - ex_pos.x, craft.pos.z - ex_pos.y).length()
+	if craft_d > 90.0:
+		_show_objective("Spacecraft is too far from the extractor (%.0fm) — land it next to this pad."
+			% craft_d, 6.0)
+		return
+	if GameState.he3_cargo >= HE3_LOAD_KG:
+		_show_objective("Hold's full — %d kg of He-3 aboard. Fly it home and sell." % int(GameState.he3_cargo), 5.0)
+		return
+	if _he3_cooldown > 0.0:
+		_show_objective("Extractor recharging — %d s until the next load." % int(ceil(_he3_cooldown)), 4.0)
+		return
+	# Force landed state so a soft touch-down always counts.
+	craft.phase = "landed"
+	craft.on_ground = true
+	GameState.he3_cargo = HE3_LOAD_KG
+	_he3_cooldown = HE3_COOLDOWN
+	AudioFX.thruster()
+	Gamepad.pulse(0.5, 0.6, 0.5)
+	_show_objective("LOADED — %d kg He-3 aboard. Fly home and sell at the fuel depot (HE3 $%s/kg)."
+		% [int(HE3_LOAD_KG), Forbes.commas(int(StockMarket.price_of("HE3")))], 9.0)
+
+
+## Sell the hold at the fuel depot — the spacecraft has to be back on Earth,
+## landed, cargo intact. Pays kg × the LIVE HE3 ticker price, so a run sold
+## into a rally is worth multiples of one sold into a crash.
+func _sell_he3() -> void:
+	if GameState.he3_cargo <= 0.0:
+		_show_objective("No He-3 aboard — the extractor is at the moon base.", 5.0)
+		return
+	var craft = null
+	for v in vehicles:
+		if v.get("is_spacecraft", false) and v.leg == "earth" and v.phase == "landed":
+			craft = v
+			break
+	if craft == null:
+		_show_objective("The depot unloads the SPACECRAFT — land it back at the facility first.", 5.0)
+		return
+	var price: float = StockMarket.price_of("HE3")
+	var payout: int = int(GameState.he3_cargo * price)
+	GameState.money += payout
+	_show_objective("SOLD — %d kg He-3 at $%s/kg:  +$%s."
+		% [int(GameState.he3_cargo), Forbes.commas(int(price)), Forbes.commas(payout)], 9.0)
+	GameState.he3_cargo = 0.0
+	AudioFX.coin()
+	Gamepad.pulse(0.4, 0.5, 0.4)
+
+
+## The City Planning kiosk: review, then a double-press E confirm to fund the
+## island; progress reports while it builds; a brochure once it's open.
+func _island_kiosk_interact() -> void:
+	match GameState.island_stage:
+		0:
+			if GameState.money < CityWorld.ISLAND_COST:
+				_show_objective("NEW HARBOR ISLAND — $%s to fund. Come back richer."
+					% Forbes.commas(CityWorld.ISLAND_COST), 5.0)
+				return
+			if _island_confirm_t > 0.0:
+				_island_confirm_t = 0.0
+				GameState.money -= CityWorld.ISLAND_COST
+				GameState.island_stage = 1
+				GameState.island_progress = 0.0
+				world.set_island_stage(1)
+				GameState.add_respect(10.0)
+				GameState.add_happiness(8.0)
+				AudioFX.coin()
+				_show_objective("SIGNED — $%s committed. New Harbor Island is under construction east of the city."
+					% Forbes.commas(CityWorld.ISLAND_COST), 9.0)
+			else:
+				_island_confirm_t = 6.0
+				_show_objective("Fund NEW HARBOR ISLAND for $%s? Press E again to sign."
+					% Forbes.commas(CityWorld.ISLAND_COST), 6.0)
+		3:
+			_show_objective("New Harbor Island is open — hotel, casino and lighthouse across the east bridge.", 6.0)
+		_:
+			_show_objective("Construction at %d%% — watch the cranes off the east coast."
+				% int(GameState.island_progress * 100.0), 5.0)
+
+
+## One 5-star seizure pulse — the city takes something, in order of drama:
+## an owned car is towed to the impound; failing that a safehouse is raided
+## for damages scaled to net worth; failing that cash is clawed back straight
+## off the player. Every pulse is announced, so losses never feel silent.
+func _seizure_pulse() -> void:
+	var car_idx := Garage.impound_random_vehicle()
+	if car_idx >= 0:
+		AudioFX.siren()
+		_show_objective("CITY SEIZURE — your %s was towed to the impound. Recover it at the dealership."
+			% VehicleCatalog.LIST[car_idx].name, 7.0)
+		return
+	if not Garage.properties.is_empty():
+		# Damages scale with net worth but never take more than a quarter of
+		# pocket cash per raid — punishing, not a one-pulse wipeout for
+		# players whose worth lives mostly in stocks.
+		var fine: int = mini(int(GameState.money * 0.25),
+			maxi(20_000, int(Forbes.player_net_worth() * 0.005)))
+		fine = mini(fine, GameState.money)
+		if fine > 0:
+			GameState.money -= fine
+			var p: Dictionary = PropertyCatalog.LIST[Garage.properties[randi() % Garage.properties.size()]]
+			AudioFX.siren()
+			_show_objective("SAFEHOUSE RAID — police tossed %s. Damages: $%s."
+				% [p.name, Forbes.commas(fine)], 7.0)
+			return
+	var cash_fine: int = mini(GameState.money, maxi(10_000, int(GameState.money * 0.02)))
+	if cash_fine > 0:
+		GameState.money -= cash_fine
+		AudioFX.siren()
+		_show_objective("ASSET SEIZURE — the city clawed back $%s." % Forbes.commas(cash_fine), 6.0)
+
+
 func _spawn_owned_vehicle(catalog_idx: int) -> void:
+	if Garage.is_impounded(catalog_idx):
+		_show_objective("That car is in the city impound — recover it at the dealership first.", 4.0)
+		return
 	var car: Dictionary = VehicleCatalog.LIST[catalog_idx]
 	if _owned_spawn != null and _owned_spawn != in_car and _owned_spawn in vehicles:
 		_owned_spawn.node.queue_free()
@@ -1096,6 +1350,7 @@ func _process(delta: float) -> void:
 		# it paused.
 		AudioFX.rocket_engine_stop()
 		AudioFX.spacecraft_engine_stop()
+		AudioFX.jet_engine_stop()
 		AudioFX.wind_stop()
 		return
 	var dt: float = min(0.05, delta)
@@ -1154,6 +1409,17 @@ func _process(delta: float) -> void:
 		_update_suit(dt)
 	else:
 		_update_on_foot(dt)
+
+	# The turbofan loop lives only while flying the actual plane — this one
+	# idempotent stop covers exit, bail-out, explosion and vehicle swaps.
+	if in_car == null or not in_car.is_plane or in_car.get("is_heli", false) \
+			or in_car.get("is_rocket", false) or in_car.get("is_spacecraft", false):
+		AudioFX.jet_engine_stop()
+	# Same idea for the spacecraft's nav panel — hide it the frame you're out.
+	if in_car == null or not in_car.get("is_spacecraft", false):
+		hud.set_space_nav({})
+	# Planet spheres show/hide by height while the space sky is up.
+	world.update_space_vista(player_pos.y)
 
 	# Chase cam: in a car or plane the camera auto-swings behind the vehicle's
 	# heading — turn left and the view follows left, turn right and it follows
@@ -1214,6 +1480,45 @@ func _process(delta: float) -> void:
 		_die()
 		return
 
+	# ----- Asset seizure — the city comes after a rich criminal's property.
+	# 4 stars freezes the trading account (enforced in stock_terminal.gd);
+	# at 5 stars a seizure pulse fires every ~18 s: cars get towed to the
+	# impound, safehouses get raided for damages, and failing anything else
+	# the city claws back cash directly.
+	if GameState.wanted >= 3.5 and not _stocks_frozen:
+		_stocks_frozen = true
+		_show_objective("MARKET WATCHDOG — your trading account is FROZEN while you're wanted.", 6.0)
+	elif GameState.wanted < 3.5 and _stocks_frozen:
+		_stocks_frozen = false
+		_show_objective("Heat's off — trading account unfrozen.", 4.0)
+	if GameState.wanted >= 4.5:
+		_seizure_t -= dt
+		if _seizure_t <= 0.0:
+			_seizure_t = 18.0
+			_seizure_pulse()
+	else:
+		_seizure_t = 8.0
+
+	# The lunar extractor refills in real time wherever the player is.
+	_he3_cooldown = maxf(0.0, _he3_cooldown - dt)
+
+	# ----- New Harbor Island construction — advances in real time once
+	# funded: foundations (stage 1) → bridge standing (stage 2) → open
+	# (stage 3, walkable + solid). ~5 real minutes end to end.
+	if GameState.island_stage == 1 or GameState.island_stage == 2:
+		GameState.island_progress = minf(1.0, GameState.island_progress + dt / 300.0)
+		if GameState.island_progress >= 1.0:
+			GameState.island_stage = 3
+			world.set_island_stage(3)
+			GameState.add_respect(10.0)
+			GameState.add_happiness(10.0)
+			AudioFX.coin()
+			_show_objective("NEW HARBOR ISLAND IS OPEN — drive east across the bay. The city will never forget who built it.", 10.0)
+		elif GameState.island_stage == 1 and GameState.island_progress >= 0.5:
+			GameState.island_stage = 2
+			world.set_island_stage(2)
+			_show_objective("NEW HARBOR ISLAND — the bay bridge is standing.", 6.0)
+
 	if not _in_space_sky():
 		_update_daynight()
 	_update_falling_boosters(dt)
@@ -1225,13 +1530,15 @@ func _process(delta: float) -> void:
 	RaceManager.tick(dt, player_pos,
 		in_car != null and not in_car.is_plane, car_drifting)
 	_update_race(dt)
-	AudioFX.set_radio(in_car != null and not in_car.is_plane
-		and not in_car.get("is_boat", false))
+	# In-car radio removed — the synthesized melody loop read as a weird
+	# constant beeping rather than music. Driving keeps only real event
+	# audio (crashes, horns, gunfire) and faint controller rumble.
+	AudioFX.set_radio(false)
 	# A cryptic, one-time nudge toward the hidden facility — no waypoint or
 	# minimap marker ever points to it; this is the only hint the player gets.
 	if not _facility_hint_shown and _now > 240.0:
 		_facility_hint_shown = true
-		_show_objective("Strange lights reported in the northern mountains...", 6.0)
+		_show_objective("Strange lights reported far to the north, past the wilderness...", 6.0)
 	_update_camera(dt)
 	_push_hud()
 
@@ -1270,7 +1577,8 @@ func _update_race(dt: float) -> void:
 
 # ---------------- On foot ----------------
 ## Floaty low-gravity walk on the Moon — slower, with a bounding bob, no city
-## collision (the lunar surface is open).
+## collision. Clamped to the playable disc so you never walk off into the void
+## and see Earth through the plate.
 func _update_moon_walk(dt: float) -> void:
 	var mx := _move_x()
 	var mz := _move_z()
@@ -1286,8 +1594,16 @@ func _update_moon_walk(dt: float) -> void:
 		player_pos.x += dx
 		player_pos.z += dz
 		player_yaw = atan2(dx, dz)
+	var clamped := world.moon_clamp_xz(player_pos.x, player_pos.z)
+	player_pos.x = clamped.x
+	player_pos.z = clamped.y
 	var bob: float = absf(sin(walk_phase * 0.45)) * (0.55 if l > 0.0 else 0.0)
-	player_pos.y = world.moon_height(player_pos.x, player_pos.z) + bob
+	var gy: float = world.moon_height(player_pos.x, player_pos.z)
+	# Snap up if anything left us under the plate (craft exit, suit, bug).
+	if player_pos.y < gy - 1.5:
+		player_pos.y = gy
+	else:
+		player_pos.y = gy + bob
 	player_node.position = player_pos
 	player_node.rotation.y = player_yaw
 	Human.animate(player_node, walk_phase * 0.6, l > 0.0, 0.7, 0.49)
@@ -1303,7 +1619,7 @@ func _update_moon_walk(dt: float) -> void:
 
 
 func _update_on_foot(dt: float) -> void:
-	if space_state == "moon":
+	if _on_moon_surface():
 		_update_moon_walk(dt)
 		return
 	var mx := _move_x()
@@ -1402,6 +1718,47 @@ func _update_on_foot(dt: float) -> void:
 		_show_objective("Angel Ventures HQ — pitch meetings inside.", 4.0)
 	_near_ventures = near_ventures
 
+	# Walk up to the City Planning kiosk — the New Harbor Island megaproject.
+	var ikd := Vector2(CityWorld.ISLAND_KIOSK.x - player_pos.x,
+		CityWorld.ISLAND_KIOSK.z - player_pos.z).length()
+	var near_ik := ikd < 3.6
+	if near_ik and not _near_island_kiosk:
+		match GameState.island_stage:
+			0:
+				_show_objective("CITY PLANNING — New Harbor Island project, $%s. Press E to review."
+					% Forbes.commas(CityWorld.ISLAND_COST), 6.0)
+			3:
+				_show_objective("New Harbor Island is COMPLETE — drive east across the bay bridge.", 5.0)
+			_:
+				_show_objective("Island construction at %d%% — cranes on the water east of the city."
+					% int(GameState.island_progress * 100.0), 5.0)
+	_near_island_kiosk = near_ik
+	_island_confirm_t = maxf(0.0, _island_confirm_t - dt)
+
+	# He-3 economy: the extractor on the Moon, the buyer back at the facility.
+	if _on_moon_surface():
+		var exd := Vector2(CityWorld.MOON_PAD.x + CityWorld.HE3_EXTRACTOR.x - player_pos.x,
+			CityWorld.MOON_PAD.z + CityWorld.HE3_EXTRACTOR.z - player_pos.z).length()
+		# Whole apron counts — player stands on the pad, not the drill tower.
+		var near_ex := exd < 22.0
+		if near_ex and not _near_extractor:
+			if _moon_landed_spacecraft() != null:
+				_show_objective("He-3 ready — PRESS E on this pad to load 120 kg into the spacecraft.", 6.0)
+			else:
+				_show_objective("He-3 extractor — land the spacecraft on this pad, step out, PRESS E.", 6.0)
+		_near_extractor = near_ex
+		# If they landed but state is still moon_landed while on foot, promote to moon.
+		if space_state == "moon_landed" and in_car == null:
+			space_state = "moon"
+	else:
+		_near_extractor = false
+	var byd := Vector2(CityWorld.HE3_BUYER.x - player_pos.x,
+		CityWorld.HE3_BUYER.z - player_pos.z).length()
+	var near_by := byd < 3.6
+	if near_by and not _near_he3_buyer:
+		_show_objective("Fuel depot — sells your He-3 cargo at the live HE3 price.", 4.0)
+	_near_he3_buyer = near_by
+
 	# Inside the trading-floor office: detect the monitor desk and the exit pad.
 	if in_trading_floor:
 		var td := Vector2(CityWorld.OFFICE_DESK.x - player_pos.x,
@@ -1433,8 +1790,8 @@ func _update_car(v: Dictionary, dt: float) -> void:
 	v.speed *= 1.0 - dt * (4.0 if handbrake else 0.6)
 	var max_s: float = v.max_speed * boost
 	v.speed = clamp(v.speed, -max_s / 2.0, max_s)
-	if abs(v.speed) > 1.0 and randf() < 0.15:
-		AudioFX.engine_rev(absf(v.speed) / maxf(v.max_speed, 1.0))
+	# (The random sawtooth engine-rev blips are gone too — same complaint as
+	# the radio: they read as artificial chirps, not an engine.)
 	var speed_frac: float = clampf(absf(v.speed) / maxf(v.max_speed, 1.0), 0.0, 1.0)
 	# Engine haptics — kept very faint so the road feel doesn't drown out the
 	# events that matter (crashes, kills). Only a slight low rumble at high speed,
@@ -1581,19 +1938,25 @@ func _seat_bike_rider(v: Dictionary) -> void:
 
 # ---------------- Plane ----------------
 func _update_plane(v: Dictionary, dt: float) -> void:
-	# A/D yaw (banked turn), Up/Down arrows pitch the nose. The engine spools
-	# up on its own toward cruise power, so the plane always builds flying
-	# speed — just hold Up to climb. W boosts, S throttles back.
-	var thrust := _move_z()
+	# A/D yaw (banked turn), Up/Down arrows pitch the nose. The throttle is a
+	# real power lever the player owns: R2 / W spools it up, L2 / S winds it
+	# down, and it HOLDS where you set it — no auto-spool, so a parked plane
+	# stays parked until you push the power up yourself.
+	var power := _drive_accel()                      # +1 R2/W .. -1 L2/S
 	var turn := -_move_x()
 	var pitch_input := _updown()
 
-	# Throttle auto-spools toward cruise (0.72); W boosts to full, S throttles
-	# back. The plane is never stuck idling — it always accelerates to fly.
-	var target_throttle: float = clampf(0.72 + thrust * 0.28, 0.0, 1.0)
-	v.throttle = move_toward(v.throttle, target_throttle, 0.9 * dt)
+	# Fresh-press gate (same as the shuttle/spacecraft): inputs held over
+	# from before boarding are dead until released once.
+	if not v.get("launch_armed", true):
+		if absf(power) < 0.05:
+			v.launch_armed = true
+		power = 0.0
+
+	v.throttle = clampf(v.throttle + power * 0.45 * dt, 0.0, 1.0)
 	v.speed = move_toward(v.speed, v.throttle * v.max_speed, v.max_speed * 0.6 * dt)
-	Gamepad.set_engine(0.10 + v.throttle * 0.14, 0.04)   # steady jet-engine hum
+	AudioFX.jet_engine_set(v.throttle, clampf(v.speed / v.max_speed, 0.0, 1.0))
+	Gamepad.set_engine(0.10 + v.throttle * 0.14, 0.04)   # controller rumble only
 
 	# Pitch — Up raises the nose, Down drops it; snaps back level when released.
 	v.pitch += pitch_input * 0.8 * dt
@@ -1605,6 +1968,22 @@ func _update_plane(v: Dictionary, dt: float) -> void:
 	if v.speed > 5.0:
 		v.yaw += turn * 0.7 * dt
 	v.roll = lerp(v.roll, -turn * 0.5, dt * 3.0)
+
+	# Landing gear — toggle in flight; animates over ~1.2 s, sliding the
+	# model's real gear legs up into the belly before hiding them. Locked
+	# while on the ground (retracting a parked plane's gear would drop it on
+	# its belly).
+	if Input.is_action_just_pressed(InputConfig.action_id("landing_gear")) and not v.on_ground:
+		v.gear_down = not v.get("gear_down", true)
+		AudioFX.gear_whirr()
+		_show_objective("Landing gear DOWN." if v.gear_down else "Landing gear UP.", 2.5)
+	var gear_t: float = move_toward(v.get("gear_t", 1.0),
+		1.0 if v.get("gear_down", true) else 0.0, dt / 1.2)
+	v.gear_t = gear_t
+	for leg in v.get("gear_nodes", []):
+		var leg_node: Node3D = leg.node
+		leg_node.position.y = leg.rest_y + (1.0 - gear_t) * 330.0
+		leg_node.visible = gear_t > 0.04
 
 	# Vertical motion: above takeoff speed the nose sets climb/descent; below
 	# it the wings can't carry the plane and it sinks.
@@ -1618,7 +1997,18 @@ func _update_plane(v: Dictionary, dt: float) -> void:
 		v.pos.y = 0.0
 	if v.pos.y > v.max_alt:
 		v.pos.y = v.max_alt
+	var was_airborne: bool = not v.on_ground
 	v.on_ground = v.pos.y <= 0.15
+	# Touching down with the wheels still up grinds the belly.
+	if was_airborne and v.on_ground and v.get("gear_t", 1.0) < 0.5:
+		v.hp -= 45.0
+		AudioFX.crash_metal()
+		_add_cam_shake(0.5)
+		for i in 8:
+			_spawn_particle(v.pos.x + (randf() - 0.5) * 4.0, 0.4,
+				v.pos.z + (randf() - 0.5) * 4.0, [0xffb347, 0xff6a3a].pick_random(),
+				0.4 + randf() * 0.3, (randf() - 0.5) * 6.0, 2.0 + randf() * 4.0, (randf() - 0.5) * 6.0)
+		_show_objective("BELLY LANDING — the airframe took a beating.", 4.0)
 
 	# Horizontal travel along the nose heading.
 	var h: float = cos(v.pitch)
@@ -1627,11 +2017,17 @@ func _update_plane(v: Dictionary, dt: float) -> void:
 	if not world.collides_at(v.pos.x + dx, v.pos.z, v.radius, v.pos.y):
 		v.pos.x += dx
 	else:
+		if absf(v.speed) > 8.0:
+			AudioFX.crash_metal()
+			_add_cam_shake(0.4)
 		v.speed *= 0.3
 		v.hp -= 5.0
 	if not world.collides_at(v.pos.x, v.pos.z + dz, v.radius, v.pos.y):
 		v.pos.z += dz
 	else:
+		if absf(v.speed) > 8.0:
+			AudioFX.crash_metal()
+			_add_cam_shake(0.4)
 		v.speed *= 0.3
 		v.hp -= 5.0
 
@@ -1817,18 +2213,23 @@ func _try_enter_exit() -> void:
 		player_node.visible = best.get("style", "") == "bike"
 		if best.get("is_rocket", false):
 			cam_dist = best.get("cam_dist", 28.0)
-			if space_state == "moon":
+			# Boarding never launches by itself — takeoff waits for a fresh
+			# thrust press after everything is released (see launch_armed in
+			# _update_rocket / _update_spacecraft).
+			best.launch_armed = false
+			if _on_moon_surface():
 				space_state = "moon_ascent"
-				_show_objective("Lift off — fly home to Earth.", 6.0)
+				_show_objective("LOADED — hold thrust (W / R2) when ready to fly home to Earth.", 8.0)
 			else:
 				space_state = "ascent"
-				_show_objective("ROCKET — climb to space, then the Moon.", 9.0)
+				_show_objective("SHUTTLE LOADED — hold thrust (W / R2) when ready to launch.", 9.0)
 		elif best.get("is_spacecraft", false):
 			cam_dist = best.get("cam_dist", 20.0)
+			best.launch_armed = false
 			if best.phase == "landed" and best.leg == "moon":
-				_show_objective("SPACECRAFT — hold thrust to lift off from the Moon: hover, then hyperspeed home.", 8.0)
+				_show_objective("LOADED — hold thrust (W / R2) when ready: hover, then hyperspeed home.", 8.0)
 			elif best.phase == "landed":
-				_show_objective("SPACECRAFT — hold thrust to lift off: hover, then hyperspeed to space.", 8.0)
+				_show_objective("LOADED — hold thrust (W / R2) when ready: hover, then hyperspeed to space.", 8.0)
 			else:
 				_show_objective("Back in the cockpit.", 3.0)
 		elif best.get("is_heli", false):
@@ -1839,7 +2240,9 @@ func _try_enter_exit() -> void:
 			_show_objective("Boat underway — cruise the river and the bay.", 7.0)
 		elif best.is_plane:
 			cam_dist = best.get("cam_dist", 12.0)
-			_show_objective("Plane airborne — the engine spools up on its own once rolling.", 8.0)
+			best.launch_armed = false
+			_show_objective("PLANE — R2 / W throttle up, L2 / S throttle down, %s toggles gear." %
+				InputConfig.binding_text("landing_gear", InputConfig.preferred_device()), 8.0)
 		else:
 			cam_dist = 6.5
 
@@ -2104,7 +2507,7 @@ func _refresh_suit_model() -> void:
 
 ## The Y of the surface at (x, z) — the Moon's heightfield when up there, else 0.
 func _ground_y(x: float, z: float) -> float:
-	return world.moon_height(x, z) if space_state == "moon" else 0.0
+	return world.moon_height(x, z) if _on_moon_surface() else 0.0
 
 
 func _begin_suit() -> void:
@@ -2203,7 +2606,7 @@ func _summon_suit() -> void:
 	# Where the armour streaks in from. On the Moon the parked suit is back on
 	# Earth, so the plates come down from just above the player instead.
 	var origin_xz := Vector3(origin.x, gy, origin.z)
-	if space_state == "moon":
+	if _on_moon_surface():
 		origin_xz = Vector3(player_pos.x, gy + 40.0, player_pos.z)
 	var start: Vector3 = suit_node.to_local(origin_xz)
 	var starts: Array = []
@@ -2282,10 +2685,13 @@ func _update_suit(dt: float) -> void:
 			spd *= 1.7
 		var dx := (rgt.x * mx + fwd.x * mz) * spd * dt
 		var dz := (rgt.z * mx + fwd.z * mz) * spd * dt
-		if space_state == "moon":
-			# The lunar surface is open — no city collision up here.
+		if _on_moon_surface():
+			# Open surface, but stay on the playable disc.
 			player_pos.x += dx
 			player_pos.z += dz
+			var mc := world.moon_clamp_xz(player_pos.x, player_pos.z)
+			player_pos.x = mc.x
+			player_pos.z = mc.y
 		else:
 			if not world.collides_at(player_pos.x + dx, player_pos.z, 0.6, player_pos.y):
 				player_pos.x += dx
@@ -2648,6 +3054,7 @@ func _update_bullets(dt: float) -> void:
 						player_armor -= ab
 						dmg -= ab
 					player_hp -= dmg
+					_last_killer = b.source        # for death-cash attribution
 					_spawn_blood(player_pos.x, 1.2, player_pos.z, 4)
 					Gamepad.pulse(0.55, 0.55, 0.18)    # taking a round hurts
 				AudioFX.hit()
@@ -3078,6 +3485,85 @@ func _find_open_spot() -> Vector2:
 	return Vector2.ZERO
 
 
+# Where each Forbes tycoon holds court — one landmark plaza each, so hunting
+# a specific rival is a real activity, not a random encounter.
+const RIVAL_TURFS := [
+	Vector2(8.0, -14.0),      # Otto Bergmann — Exchange plaza
+	Vector2(40.0, 34.0),      # Eleanor Vance — Ventures HQ
+	Vector2(-8.0, 34.0),      # Kazuo Tanaka — dealership lot
+	Vector2(-40.0, -14.0),    # Rex Calloway — Stark block
+	Vector2(-40.0, 34.0),     # Priya Nandakumar — hospital plaza
+	Vector2(8.0, 60.0),       # Simone Delacroix — mid-town
+	Vector2(-72.0, 100.0),    # Marcus Whitfield — river west
+	Vector2(72.0, -80.0),     # Ines Okafor — uptown east
+]
+
+
+## Put every LIVING Forbes rival physically in the city — a bigger, tougher
+## VIP with a five-man security detail and a floating name/net-worth tag.
+## They ride the existing vips/guards systems end to end: damage aggros the
+## detail, and _update_vips' death branch handles the inheritance. Idempotent
+## (clears previous rival entries first) and called AFTER the save loads, so
+## assassinated tycoons stay dead.
+func _spawn_forbes_rivals() -> void:
+	for v in vips:
+		if v.has("rival"):
+			for g in v.guards:
+				g.node.queue_free()
+				guards.erase(g)
+			v.node.queue_free()
+	vips = vips.filter(func(v) -> bool: return not v.has("rival"))
+	for i in Forbes.rivals.size():
+		var r: Dictionary = Forbes.rivals[i]
+		if not r.get("alive", true):
+			continue
+		var turf: Vector2 = RIVAL_TURFS[i % RIVAL_TURFS.size()]
+		var spot := turf
+		for tries in 20:
+			if not world.collides_at(spot.x, spot.y, 1.5):
+				break
+			spot = turf + Vector2((randf() - 0.5) * 14.0, (randf() - 0.5) * 14.0)
+		var vnode := Human.build_model("vip_suit")
+		vnode.scale *= 1.12
+		vnode.position = Vector3(spot.x, 0, spot.y)
+		add_child(vnode)
+		var tag := Label3D.new()
+		tag.font_size = 44
+		tag.pixel_size = 0.0062
+		tag.modulate = Color("f5c451")
+		tag.outline_modulate = Color(0, 0, 0, 0.9)
+		tag.outline_size = 8
+		tag.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		tag.position = Vector3(0, 2.6, 0)
+		vnode.add_child(tag)
+		var vip := {
+			"node": vnode, "pos": Vector3(spot.x, 0, spot.y), "yaw": randf() * TAU,
+			"hp": 240.0, "max_hp": 240.0, "cash": 0,
+			"walk_timer": 0.0, "walk_phase": randf() * TAU, "aggro": false,
+			"guards": [], "rival": String(r.name), "tag": tag,
+		}
+		vips.append(vip)
+		for gi in 5:
+			var ga := float(gi) / 5.0 * TAU
+			var off := Vector2(cos(ga) * 4.5, sin(ga) * 4.5)
+			var gnode := Human.build_model("guard_suit")
+			gnode.position = Vector3(spot.x + off.x, 0, spot.y + off.y)
+			add_child(gnode)
+			var glimbs: Dictionary = gnode.get_meta("limbs")
+			var gholder := Node3D.new()
+			gholder.position = Vector3(0.0, -0.86, 0.18)
+			glimbs.armR.add_child(gholder)
+			gholder.add_child(_weapon_model(2))
+			var guard := {
+				"node": gnode, "pos": Vector3(spot.x + off.x, 0, spot.y + off.y),
+				"yaw": 0.0, "hp": 140.0, "max_hp": 140.0,
+				"walk_phase": randf() * TAU, "last_shot": 0.0,
+				"aggro": false, "vip": vip, "offset": off,
+			}
+			guards.append(guard)
+			vip.guards.append(guard)
+
+
 func _spawn_vip_groups(n: int) -> void:
 	for i in n:
 		var spot := _find_open_spot()
@@ -3126,6 +3612,28 @@ func _update_vips(dt: float) -> void:
 			if v.get("is_president", false):
 				_kill_president(v)
 				continue
+			if v.has("rival"):
+				# A Forbes tycoon is down — their entire fortune transfers to
+				# the killer, and the city goes to full alert.
+				var gained: float = Forbes.kill_rival(v.rival)
+				_spawn_blood(v.pos.x, 1.2, v.pos.z, 30)
+				if gained > 0.0:
+					GameState.money += int(gained)
+					AudioFX.coin()
+					_show_objective("%s IS DEAD — their %s empire is yours. The whole city is hunting you."
+						% [v.rival, Forbes.short_money(gained)], 10.0)
+				# Assassinating a public figure is instant maximum heat
+				# (_raise_wanted scales its input — go straight to 5 stars,
+				# after letting it run its cop-timer/mood side effects).
+				_raise_wanted(1.0)
+				if not city_owned:
+					GameState.wanted = 5.0
+				GameState.add_happiness(-8.0)
+				for g in v.guards:
+					g.aggro = true
+					g.vip = null
+				v.node.queue_free()
+				continue
 			_spawn_blood(v.pos.x, 1.2, v.pos.z, 22)
 			_spawn_pickup(v.pos.x, v.pos.z, v.cash)
 			_raise_wanted(3.0)
@@ -3137,6 +3645,16 @@ func _update_vips(dt: float) -> void:
 				g.vip = null
 			v.node.queue_free()
 			continue
+		if v.has("rival"):
+			# Keep the floating tag tracking the live Forbes worth (text only
+			# rebuilt when the short form actually changes).
+			for r in Forbes.rivals:
+				if r.name == v.rival:
+					var worth_s: String = Forbes.short_money(r.worth)
+					if v.get("tag_worth", "") != worth_s:
+						v.tag_worth = worth_s
+						v.tag.text = "%s\n%s" % [String(v.rival).to_upper(), worth_s]
+					break
 		if v.get("is_president", false):
 			keep.append(v)
 			continue                          # the motorcade system drives the President
@@ -3222,7 +3740,12 @@ func _update_guards(dt: float) -> void:
 				var dir := (Vector3(target.x, target.y + 1.2, target.z) - from).normalized()
 				dir.x += (randf() - 0.5) * 0.06
 				dir.z += (randf() - 0.5) * 0.06
-				_spawn_bullet(from, dir.normalized(), WeaponDB.LIST[2], "cop")
+				# Rival security fires attributed rounds — if one of these
+				# kills the player, that tycoon inherits the dropped cash.
+				var src := "cop"
+				if g.vip != null and g.vip.has("rival"):
+					src = "rival:" + String(g.vip.rival)
+				_spawn_bullet(from, dir.normalized(), WeaponDB.LIST[2], src)
 				AudioFX.shoot()
 			g.walk_phase += dt * 7.0
 			Human.animate(g.node, g.walk_phase, d > 6.0, 0.6, 0.36)
@@ -3561,22 +4084,11 @@ func _make_vehicle(x: float, z: float, color: int, style := "sedan") -> Dictiona
 ##     trip, re-entry and splashdown all fly the orbiter alone, exactly like
 ##     the old rocket's upper stage did.
 func _make_rocket(x: float, z: float) -> Dictionary:
-	var import_root: Node3D = SHUTTLE_SCENE.instantiate()
-	var orbiter_mesh: MeshInstance3D = import_root.find_child("Object_2", true, false)
-	var tank_mesh: MeshInstance3D = import_root.find_child("Object_3", true, false)
-	var booster_mesh: MeshInstance3D = import_root.find_child("Object_4", true, false)
-	for mesh_node in [orbiter_mesh, tank_mesh, booster_mesh]:
-		mesh_node.get_parent().remove_child(mesh_node)
-		mesh_node.owner = null   # was owned by the packed scene's root; avoid
-			# the "will make owner inconsistent" warning on reparent (see
-			# _wrap_rotor_pivot()'s identical fix for the helicopter's blades)
-	import_root.queue_free()   # the now-empty Sketchfab import shell
-
 	# Upper stage — the vehicle node. Origin at the base of the WHOLE stack
 	# (the booster nozzles resting on the pad), so no separate booster-height
 	# offset is needed the way the old procedural rocket required.
 	var g := Node3D.new()
-	g.add_child(_wrap_shuttle_mesh(orbiter_mesh))
+	g.add_child(_wrap_shuttle_stage("Object_2"))
 
 	# Layered exhaust plume — bright core, orange mid, translucent outer, all
 	# fanning down from a shared nozzle glow. _update_rocket_fx() scales and
@@ -3610,29 +4122,21 @@ func _make_rocket(x: float, z: float) -> Dictionary:
 	nozzle_glow.visible = false
 	g.add_child(nozzle_glow)
 
-	# Re-entry heat-shield glow — a squashed emissive shell at the base,
-	# hidden until _update_rocket_fx() lights it up during "reentry".
-	var heat_mat := Build.emissive(Build.hex(0xff5a20), Build.hex(0xff7a30), 0.0)
-	heat_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	heat_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	heat_mat.albedo_color.a = 0.55
-	var heat_glow := Build.sphere(2.6, heat_mat)
-	heat_glow.scale = Vector3(1.0, 0.4, 1.0)
-	heat_glow.position = Vector3(0, 0.4, 0)
-	heat_glow.visible = false
-	g.add_child(heat_glow)
+	# Re-entry is particle-driven. The old squashed sphere looked like a spring
+	# or attachment ring left on the orbiter after staging, so no shell mesh is
+	# carried with the separated spacecraft anymore.
 	add_child(g)
 
 	# External tank — its own top-level node so it can tumble away
 	# independently once it separates (see _separate_tank()).
 	var tank_node := Node3D.new()
-	tank_node.add_child(_wrap_shuttle_mesh(tank_mesh))
+	tank_node.add_child(_wrap_shuttle_stage("Object_3"))
 	add_child(tank_node)
 
 	# Twin SRB boosters — same idea, plus a small dying tail flame shown
 	# briefly after separation (see _separate_booster()).
 	var booster_node := Node3D.new()
-	booster_node.add_child(_wrap_shuttle_mesh(booster_mesh))
+	booster_node.add_child(_wrap_shuttle_stage("Object_4"))
 	var b_flame_mat := Build.emissive(Build.hex(0xff8a20), Build.hex(0xff6a10), 3.0)
 	b_flame_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	var b_flame := Build.cyl(1.1, 0.1, 3.0, 8, b_flame_mat)
@@ -3650,7 +4154,7 @@ func _make_rocket(x: float, z: float) -> Dictionary:
 		"node": g, "booster": booster_node, "tank_node": tank_node,
 		"flame": {
 			"core": flame_core, "mid": flame_mid, "outer": flame_outer, "glow": nozzle_glow,
-			"heat": heat_glow, "core_mat": core_mat, "glow_mat": glow_mat, "heat_mat": heat_mat,
+			"core_mat": core_mat, "glow_mat": glow_mat,
 		},
 		"pos": Vector3(x, ROCKET_BASE_Y, z), "yaw": 0.0, "speed": 0.0, "throttle": 0.0,
 		"tilt": 0.0, "max_speed": 135.0, "max_alt": 9000.0,
@@ -3661,13 +4165,18 @@ func _make_rocket(x: float, z: float) -> Dictionary:
 	}
 
 
-## Wraps one already-detached Object_2/3/4 mesh (see _make_rocket()) in a
-## fresh Node3D sized and lifted to stand the shuttle upright. No rotation is
-## applied here at all — see SHUTTLE_MODEL_SCALE's comment for why a plain
-## scale reproduces the model's original nose-up orientation exactly.
-func _wrap_shuttle_mesh(mesh_node: MeshInstance3D) -> Node3D:
+## Keeps the GLB's axis-conversion hierarchy intact while showing exactly one
+## stage. The old implementation detached Object_2/3/4 from the imported root;
+## that discarded the root's -90-degree conversion and made the stack twist,
+## while also leaving a circular-looking attachment artifact on the orbiter.
+func _wrap_shuttle_stage(stage_name: String) -> Node3D:
+	var import_root: Node3D = SHUTTLE_SCENE.instantiate()
+	for mesh_name in ["Object_2", "Object_3", "Object_4"]:
+		var part := import_root.find_child(mesh_name, true, false) as MeshInstance3D
+		if part != null:
+			part.visible = mesh_name == stage_name
 	var wrap := Node3D.new()
-	wrap.add_child(mesh_node)
+	wrap.add_child(import_root)
 	wrap.scale = Vector3(SHUTTLE_MODEL_SCALE, SHUTTLE_MODEL_SCALE, SHUTTLE_MODEL_SCALE)
 	wrap.position = Vector3(0, SHUTTLE_BASE_OFFSET, 0)
 	return wrap
@@ -3694,6 +4203,12 @@ func _make_spacecraft(x: float, z: float, yaw: float) -> Dictionary:
 		var dup := model.find_child(dup_name, true, false)
 		if dup != null:
 			dup.free()
+	# The centered import also contains a second overlapping mesh.  It is a
+	# leftover staging harness from the source asset (visible as black coils and
+	# a yellow tether under the craft), not part of the spacecraft itself.
+	var staging_harness := model.find_child("Cube_007_Spaceship_02", true, false)
+	if staging_harness != null:
+		staging_harness.free()
 	model.scale = Vector3(SPACECRAFT_MODEL_SCALE, SPACECRAFT_MODEL_SCALE, SPACECRAFT_MODEL_SCALE)
 	model.position = Vector3(0,
 		-SPACECRAFT_MODEL_MIN_Y * SPACECRAFT_MODEL_SCALE,
@@ -3756,6 +4271,12 @@ func _update_spacecraft_fx(v: Dictionary, thrust: float) -> void:
 	if flying:
 		var flick: float = 0.85 + randf() * 0.3
 		v.glow_mat.emission_energy_multiplier = (1.5 + thrust * 5.0) * flick
+		# Controller haptics ride the same thrust curve as the engine glow —
+		# a live tremble through hover, a building roar through the spool,
+		# and both motors flat out during the hyperspeed burn.
+		if in_car == v:
+			Gamepad.set_engine(clampf((0.18 + thrust * 0.6) * flick, 0.0, 1.0),
+				clampf(thrust * 0.9 * flick, 0.0, 1.0))
 	AudioFX.spacecraft_engine_set(thrust, 1.0)
 
 
@@ -3780,14 +4301,22 @@ func _update_spacecraft(v: Dictionary, dt: float) -> void:
 			# Parked (Earth or Moon) — holding thrust (or fly-up) kicks off
 			# the hover launch; otherwise it just sits there, engine cold,
 			# always resting FLAT (never a leftover flight attitude).
+			# launch_armed gates the takeoff on a FRESH press: it goes false
+			# on boarding and only arms once thrust/climb have been fully
+			# released, so walking up holding W (or a resting trigger) can
+			# never yank the craft off the pad the moment you sit down.
 			v.speed = 0.0
 			v.vy = 0.0
 			v.pitch = 0.0
 			v.roll = 0.0
-			if thrust > 0.1 or climb > 0.1:
+			if not v.get("launch_armed", true):
+				if thrust < 0.05 and climb < 0.05:
+					v.launch_armed = true
+			elif thrust > 0.1 or climb > 0.1:
 				v.phase = "hover"
 				v.phase_t = 0.0
 				AudioFX.spacecraft_engine_start()
+				Gamepad.pulse(0.7, 0.5, 0.45)      # ignition kick
 				_show_objective("Lifting off...", 3.0)
 		"hover":
 			# A slow, floaty, scripted VERTICAL rise with a gentle bob — no
@@ -3817,14 +4346,16 @@ func _update_spacecraft(v: Dictionary, dt: float) -> void:
 				v.phase = "hyper"
 				v.phase_t = 0.0
 				_show_objective("HYPERSPEED", 2.0)
+				Gamepad.pulse(1.0, 1.0, 0.9)       # the sudden leap
 				AudioFX.wind_start()
 		"hyper":
-			# Pitch up hard and shoot straight up — the sudden lightspeed
-			# leap to orbit. Heavy shake + FOV kick + wind roar sell the
-			# speed (see _update_camera()'s spacecraft FOV-kick branch).
+			# Shoot straight up without changing the craft's visual axis. The
+			# previous hard pitch made the fighter corkscrew during the vertical
+			# burn, which read as a broken attitude controller.
 			v.vy = move_toward(v.vy, CRAFT_HYPER_VY, CRAFT_HYPER_VY / 1.2 * dt)
 			v.pos.y += v.vy * dt
-			v.pitch = move_toward(v.pitch, 1.4, 3.0 * dt)
+			v.pitch = 0.0
+			v.roll = 0.0
 			thrust_fx = 1.0
 			_add_cam_shake(0.65)
 			AudioFX.wind_set(1.0)
@@ -3874,9 +4405,16 @@ func _update_spacecraft(v: Dictionary, dt: float) -> void:
 			# it sideways, clamped so it can never tunnel through the ground.
 			# The airframe levels out on the way down, so it always touches
 			# down flat instead of keeping whatever pitch it dove in with.
+			# The sink limit scales with height: near the ground it's a gentle
+			# CRAFT_DESCENT_SPEED, but high up (the 900 m earth drop-in) it
+			# opens up to ~95 m/s so the ride down takes seconds, not minutes.
+			# NOTE the sign: climb is +1 for fly-up — the old `-climb` term
+			# had this backwards, so holding fly-down fought the descent.
 			v.pitch = move_toward(v.pitch, 0.0, 1.4 * dt)
 			v.roll = move_toward(v.roll, 0.0, 1.4 * dt)
-			v.vy = move_toward(v.vy, -climb * CRAFT_DESCENT_SPEED - 2.0, 20.0 * dt)
+			var agl: float = v.pos.y - _spacecraft_ground_y(v)
+			var max_sink: float = clampf(CRAFT_DESCENT_SPEED + agl * 0.28, CRAFT_DESCENT_SPEED, 95.0)
+			v.vy = move_toward(v.vy, climb * max_sink - 3.0, 40.0 * dt)
 			v.yaw += turn * 0.9 * dt
 			v.speed = move_toward(v.speed, thrust * 24.0, 30.0 * dt)
 			var fwd2 := Vector3(sin(v.yaw), 0, cos(v.yaw))
@@ -3892,6 +4430,7 @@ func _update_spacecraft(v: Dictionary, dt: float) -> void:
 				v.roll = 0.0
 				v.phase = "landed"
 				v.phase_t = 0.0
+				Gamepad.pulse(0.9, 1.0, 0.55)      # gear thumping the ground
 				_spacecraft_dust(v)
 				if v.leg == "moon":
 					space_state = "moon_landed"
@@ -3907,7 +4446,40 @@ func _update_spacecraft(v: Dictionary, dt: float) -> void:
 	v.node.rotation = Vector3(-v.pitch, v.yaw, v.roll)
 	if in_car == v:
 		player_pos = v.pos
+		hud.set_space_nav(_spacecraft_nav(v))
 	v.on_ground = v.phase == "landed"
+
+
+## The nav readout for the spacecraft HUD panel: which body you're over, how
+## high above it, and how far away each planet is. In-game the Moon hangs
+## MOON_Y (~4 km) above the city, so the panel maps that gap onto the real
+## 384,400 km Earth-Moon distance for flavour — 0 km parked on Earth,
+## 384,400 km parked on the Moon.
+func _spacecraft_nav(v: Dictionary) -> Dictionary:
+	var agl: float = maxf(0.0, v.pos.y - _spacecraft_ground_y(v))
+	var p: float = clampf(v.pos.y / CityWorld.MOON_Y, 0.0, 1.0)
+	var body: String = "MOON" if v.leg == "moon" else "EARTH"
+	var phase_names := {
+		"landed": "LANDED", "hover": "LIFT-OFF", "spool": "ENGINES SPOOLING",
+		"hyper": "HYPERSPEED BURN", "space": "ORBIT — FREE FLIGHT",
+		"moon_descent": "LANDING HOVER", "earth_descent": "LANDING HOVER",
+	}
+	var hint := ""
+	match v.phase:
+		"landed":
+			hint = "HOLD THRUST TO LIFT OFF"
+		"space":
+			hint = "E / SQUARE — JUMP TO " + ("EARTH" if v.leg == "moon" else "MOON")
+		"moon_descent", "earth_descent":
+			hint = "FLY-DOWN TO DESCEND"
+	return {
+		"title": body + " — " + String(phase_names.get(v.phase, v.phase.to_upper())),
+		"alt_m": agl,
+		"earth_km": 384400.0 * p,
+		"moon_km": 384400.0 * (1.0 - p),
+		"cargo_kg": GameState.he3_cargo,
+		"hint": hint,
+	}
 
 
 ## E / Interact while flying the spacecraft: in free "space" flight it jumps
@@ -3931,6 +4503,7 @@ func _spacecraft_interact(v: Dictionary) -> void:
 ## the actual landing is always the player's to fly.
 func _spacecraft_jump(v: Dictionary) -> void:
 	_add_cam_shake(0.8)
+	Gamepad.pulse(1.0, 0.8, 0.6)
 	if v.leg == "earth":
 		v.leg = "moon"
 		v.pos = Vector3(CityWorld.MOON_PAD.x + 30.0, CityWorld.MOON_Y + 240.0, CityWorld.MOON_PAD.z - 20.0)
@@ -3939,7 +4512,9 @@ func _spacecraft_jump(v: Dictionary) -> void:
 		_show_objective("JUMP TO THE MOON — hover down and land wherever you like.", 6.0)
 	else:
 		v.leg = "earth"
-		v.pos = Vector3(CityWorld.SPACECRAFT_PAD.x + 40.0, 900.0, CityWorld.SPACECRAFT_PAD.z - 30.0)
+		# Drop in right above PAD B (the +40/-30 offset predates the dedicated
+		# pad and would now hover outside the east fence).
+		v.pos = Vector3(CityWorld.SPACECRAFT_PAD.x, 900.0, CityWorld.SPACECRAFT_PAD.z)
 		v.phase = "earth_descent"
 		v.phase_t = 0.0
 		_show_objective("JUMP TO EARTH — hover down to land.", 6.0)
@@ -4032,6 +4607,9 @@ func _update_moon_buggy(v: Dictionary, dt: float) -> void:
 		v.yaw += turn * 1.4 * dt * sgn * minf(1.0, absf(v.speed) / 6.0)
 	v.pos.x += sin(v.yaw) * v.speed * dt
 	v.pos.z += cos(v.yaw) * v.speed * dt
+	var bc := world.moon_clamp_xz(v.pos.x, v.pos.z)
+	v.pos.x = bc.x
+	v.pos.z = bc.y
 	v.pos.y = world.moon_height(v.pos.x, v.pos.z)
 	var bounce: float = absf(sin(_now * 5.0)) * minf(absf(v.speed) * 0.04, 0.4)
 	v.node.position = Vector3(v.pos.x, v.pos.y + bounce, v.pos.z)
@@ -4069,18 +4647,28 @@ func _in_space_sky() -> bool:
 		"moon", "moon_ascent"]
 
 
+
+
 func _set_space_sky(on: bool) -> void:
+	world.set_space_vista(on)
 	if on:
 		env.background_mode = Environment.BG_COLOR
-		env.background_color = Color(0.015, 0.02, 0.045)
+		env.background_color = Color(0.01, 0.012, 0.03)
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		env.ambient_light_color = Color(0.55, 0.55, 0.62)
-		env.ambient_light_energy = 0.55
+		# Harder vacuum light — less muddy grey, more readable regolith.
+		env.ambient_light_color = Color(0.42, 0.44, 0.52)
+		env.ambient_light_energy = 0.28
 		env.fog_enabled = false
+		if sun != null:
+			sun.light_energy = 1.55
+			sun.light_color = Color(1.0, 0.97, 0.92)
 	else:
 		env.background_mode = Environment.BG_SKY
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 		env.fog_enabled = true
+		if sun != null:
+			sun.light_energy = 1.05
+			sun.light_color = Color(1.0, 0.94, 0.82)
 
 
 func _update_rocket(v: Dictionary, dt: float) -> void:
@@ -4089,8 +4677,19 @@ func _update_rocket(v: Dictionary, dt: float) -> void:
 		maxf(0.0, _move_z()))
 	var brake: float = maxf(1.0 if (_action_held("move_back") or _action_held("fly_down")) else 0.0,
 		maxf(0.0, -_move_z()))
-	var turn := -_move_x()
 	var was_ground: bool = v.on_ground
+
+	# Same fresh-press gate as the spacecraft's: boarding clears launch_armed,
+	# and thrust is dead until every input has been released once — the
+	# shuttle only lifts off when the player deliberately throttles up.
+	# Deliberately NOT conditioned on v.on_ground: the parked stack rests a
+	# few cm above _rocket_floor()'s value, so on_ground reads false on the
+	# first tick and a ground-gated check would disarm itself immediately.
+	if not v.get("launch_armed", true):
+		if thrust <= 0.05 and brake <= 0.05:
+			v.launch_armed = true
+		thrust = 0.0
+		brake = 0.0
 
 	if scripted:
 		var desc := -26.0 if space_state == "moon_descent" else -82.0
@@ -4114,26 +4713,27 @@ func _update_rocket(v: Dictionary, dt: float) -> void:
 	else:
 		v.on_ground = false
 
-	if not scripted:
-		v.yaw += turn * 0.55 * dt
-		v.tilt = lerpf(v.tilt, turn * 0.13, dt * 3.0)
-		if v.pos.y > floor_y + 1.0:
-			v.pos.x += sin(v.yaw) * v.tilt * 26.0 * dt
-			v.pos.z += cos(v.yaw) * v.tilt * 26.0 * dt
-	else:
-		v.tilt = lerpf(v.tilt, 0.0, dt * 2.0)
+	# The shuttle follows the launch rail and climbs on a fixed vertical axis.
+	# Player steering and cosmetic gimbal wobble previously made the whole stack
+	# corkscrew even though its trajectory was supposed to be straight up.
+	v.yaw = 0.0
+	v.tilt = 0.0
 
 	v.node.position = v.pos
-	# Engine gimbal wobble — a subtle vibration through the airframe while
-	# burning, cosmetic only (it never touches v.pos, so it can't nudge flight).
-	var wob: float = v.throttle * 0.02
-	v.node.rotation = Vector3(v.tilt + sin(_now * 17.0) * wob, v.yaw, sin(_now * 11.0) * wob)
+	v.node.rotation = Vector3.ZERO
 	if not v.separated:
 		v.booster.position = v.pos
 		v.booster.rotation = v.node.rotation
 	if not v.tank_separated:
 		v.tank_node.position = v.pos
 		v.tank_node.rotation = v.node.rotation
+	# Explicit world-space lock protects against imported child transforms and
+	# keeps the launch vehicle fixed to its vertical rail during ascent.
+	v.node.global_rotation = Vector3.ZERO
+	if not v.separated:
+		v.booster.global_rotation = Vector3.ZERO
+	if not v.tank_separated:
+		v.tank_node.global_rotation = Vector3.ZERO
 	player_pos = v.pos
 
 	# Dust (or spray) kicks up the instant the base leaves or touches the ground.
@@ -4158,6 +4758,11 @@ func _update_rocket_fx(v: Dictionary) -> void:
 	flame.glow.visible = lit
 	if lit:
 		var flick: float = 0.85 + randf() * 0.3
+		# Haptics ride the throttle — the shuttle's heavy spool-up is felt as
+		# a building roar in both motors.
+		if in_car == v:
+			Gamepad.set_engine(clampf((0.15 + t * 0.55) * flick, 0.0, 1.0),
+				clampf(t * 0.85 * flick, 0.0, 1.0))
 		var s: float = (0.5 + t * 0.65) * flick
 		if vacuum:
 			flame.core.scale = Vector3(s * 0.55, 1.1 + t * 1.0, s * 0.55)
@@ -4175,9 +4780,7 @@ func _update_rocket_fx(v: Dictionary) -> void:
 		flame.glow_mat.emission_energy_multiplier = 2.0 + t * 6.0 * flick
 		_add_cam_shake(t * (0.1 if vacuum else 0.3))
 
-	flame.heat.visible = space_state == "reentry"
-	if flame.heat.visible:
-		flame.heat_mat.emission_energy_multiplier = 2.0 + randf() * 3.0
+	if space_state == "reentry":
 		if randf() < 0.6:
 			var p: Vector3 = v.node.global_position
 			_spawn_particle(p.x + (randf() - 0.5) * 3.0, p.y - 1.0, p.z + (randf() - 0.5) * 3.0,
@@ -4269,6 +4872,7 @@ func _space_tick(v: Dictionary, dt: float) -> void:
 		"moon_descent":
 			if v.pos.y <= world.moon_height(v.pos.x, v.pos.z) + 0.6:
 				space_state = "moon_landed"
+				Gamepad.pulse(0.9, 1.0, 0.55)
 				_show_objective("TOUCHDOWN ON THE MOON.", 9.0)
 		"moon_ascent":
 			if v.pos.y > CityWorld.MOON_Y + 900.0:
@@ -4283,6 +4887,7 @@ func _space_tick(v: Dictionary, dt: float) -> void:
 				v.pos.z + randf() * 5.0 - 2.5, 3)
 			if v.pos.y <= 34.0:
 				space_state = "splashdown"
+				Gamepad.pulse(1.0, 0.9, 0.7)
 				_show_objective("SPLASHDOWN — the recovery crew is on the way.", 10.0)
 
 
@@ -4416,6 +5021,16 @@ func _make_plane(x: float, z: float, yaw: float, scale := 1.0) -> Dictionary:
 	g.add_child(model)
 	var propeller: Node3D = model.find_child("Propeller_1", true, false)
 
+	# The 787 model ships with real landing-gear nodes — collect them so the
+	# gear can retract in flight (see the gear block in _update_plane). Each
+	# entry remembers the leg's rest position; retracting slides it up into
+	# the belly (in the model's own pre-scale units) and then hides it.
+	var gear_nodes: Array = []
+	for gear_name in ["FRONT_LG", "REAR_LEFT_LG", "REAR_RIGHT_LG"]:
+		var leg: Node3D = model.find_child(gear_name, true, false)
+		if leg != null:
+			gear_nodes.append({"node": leg, "rest_y": leg.position.y})
+
 	g.scale = Vector3(scale, scale, scale)
 	g.position = Vector3(x, 0, z)
 	g.rotation.y = yaw
@@ -4427,6 +5042,7 @@ func _make_plane(x: float, z: float, yaw: float, scale := 1.0) -> Dictionary:
 		"hp": 110.0 + 50.0 * scale, "max_hp": 110.0 + 50.0 * scale,
 		"burning": false, "burn_timer": 0.0,
 		"is_plane": true, "on_ground": true, "propeller": propeller,
+		"gear_nodes": gear_nodes, "gear_down": true, "gear_t": 1.0,
 		"radius": 3.4 * scale, "cam_dist": clampf(16.0 * scale, 15.0, 28.0),
 	}
 
@@ -4447,11 +5063,12 @@ func _make_boat(x: float, z: float, yaw: float, style := "boat") -> Dictionary:
 			max_speed = 18.0
 		_:
 			_build_speedboat_mesh(g)
-	g.position = Vector3(x, 0.35, z)
+	var wy: float = world.water_surface_y(x, z) + 0.35
+	g.position = Vector3(x, wy, z)
 	g.rotation.y = yaw
 	add_child(g)
 	return {
-		"node": g, "pos": Vector3(x, 0.35, z), "yaw": yaw, "speed": 0.0,
+		"node": g, "pos": Vector3(x, wy, z), "yaw": yaw, "speed": 0.0,
 		"max_speed": max_speed, "hp": 150.0, "max_hp": 150.0, "style": style,
 		"burning": false, "burn_timer": 0.0, "is_plane": false, "is_boat": true,
 		"bob": randf() * TAU, "dive": 0.0,
@@ -4546,24 +5163,39 @@ func _build_submarine_mesh(g: Node3D) -> void:
 
 
 ## Moor water craft at the docks — speedboats, a couple of jetskis, one sub.
+## Never place a hull on asphalt: board point is nudged until on_water.
 func _spawn_boats() -> void:
 	var i := 0
 	for d in world.docks:
 		var b: Vector3 = d.board
 		var dir: Vector2 = d.dir
-		var bx: float = b.x + dir.x * 3.2
-		var bz: float = b.z + dir.y * 3.2
-		var yaw: float = 0.0 if absf(dir.x) > absf(dir.y) else PI / 2.0
+		# Walk from the board into open water until on_water reports true.
+		var bx: float = b.x
+		var bz: float = b.z
+		var found := false
+		for step in range(1, 14):
+			var tx: float = b.x + dir.x * (2.0 + step * 1.4)
+			var tz: float = b.z + dir.y * (2.0 + step * 1.4)
+			if world.on_water(tx, tz) and not world.on_airfield(tx, tz):
+				bx = tx
+				bz = tz
+				found = true
+				break
+		if not found:
+			continue
+		var yaw: float = atan2(dir.x, dir.y)
 		var style := "boat"
 		if i % 3 == 1:
 			style = "jetski"
 		elif i == 0:
 			style = "submarine"
 		vehicles.append(_make_boat(bx, bz, yaw, style))
-		# A jetski tucked alongside every speedboat dock for variety.
+		# Jetski alongside only if that offset is also wet.
 		if style == "boat":
-			vehicles.append(_make_boat(bx + dir.y * 4.0, bz + dir.x * 4.0,
-				yaw, "jetski"))
+			var jx: float = bx + dir.y * 4.0
+			var jz: float = bz + dir.x * 4.0
+			if world.on_water(jx, jz) and not world.on_airfield(jx, jz):
+				vehicles.append(_make_boat(jx, jz, yaw, "jetski"))
 		i += 1
 
 
@@ -4594,17 +5226,25 @@ func _update_boat(v: Dictionary, dt: float) -> void:
 	else:
 		v.speed *= -0.25
 	v.bob += dt * 2.4
-	v.node.position = Vector3(v.pos.x,
-		0.35 - v.get("dive", 0.0) + sin(v.bob) * 0.07, v.pos.z)
+	# Keep the vehicle's authoritative Y in sync with its dive depth so the
+	# follow camera and player state actually enter the water with the hull.
+	# Canal water is recessed; bay/open sea sits higher — match the local surface.
+	var surface: float = world.water_surface_y(v.pos.x, v.pos.z)
+	var freeboard: float = 0.4 if surface > -0.2 else 0.22
+	var water_y: float = surface + freeboard - float(v.get("dive", 0.0)) \
+		+ sin(v.bob) * 0.07
+	v.pos.y = water_y
+	v.node.position = Vector3(v.pos.x, water_y, v.pos.z)
 	v.node.rotation.y = v.yaw
 	v.node.rotation.z = sin(v.bob) * 0.045
 	v.node.rotation.x = -clampf(v.speed * 0.012, -0.12, 0.12)
 	if absf(v.speed) > 4.0 and randf() < 0.7:
-		_spawn_particle(v.pos.x - sin(v.yaw) * 3.0, 0.3, v.pos.z - cos(v.yaw) * 3.0,
+		_spawn_particle(v.pos.x - sin(v.yaw) * 3.0, surface + 0.15,
+			v.pos.z - cos(v.yaw) * 3.0,
 			0xcfe6ef, 0.5, (randf() - 0.5) * 1.6, 0.5, (randf() - 0.5) * 1.6)
 	if absf(v.speed) > 1.0 and randf() < 0.1:
 		AudioFX.engine()
-	player_pos = Vector3(v.pos.x, 0.0, v.pos.z)
+	player_pos = Vector3(v.pos.x, v.pos.y, v.pos.z)
 	if v.hp <= 0.0 and not v.burning:
 		v.burning = true
 		v.burn_timer = 2.0
@@ -5094,7 +5734,7 @@ func _wrap_rotor_pivot(model: Node3D, name_pattern: String, hub_center: Vector3)
 
 	blade.get_parent().remove_child(blade)
 	blade.owner = null   # was owned by the packed scene's root; avoid the
-	                     # "will make owner inconsistent" warning on reparent
+						 # "will make owner inconsistent" warning on reparent
 	pivot.add_child(blade)
 	blade.transform = blade_in_model_space
 	blade.position -= hub_center
@@ -5149,11 +5789,14 @@ func _update_daynight() -> void:
 	# Night floor raised well above the old 0.05 so the world stays navigable
 	# after dark (moonlight), and the directional tint cools from warm daylight
 	# toward pale blue moonlight as the sun drops below the horizon.
-	sun.light_energy = max(0.22, elev * 1.1 + 0.35)
+	sun.light_energy = max(0.18, elev * 0.75 + 0.25)
 	var moonf: float = clampf(-elev * 2.2, 0.0, 1.0)
 	sun.light_color = Color(1.0, 0.94, 0.82).lerp(Color(0.60, 0.68, 0.95), moonf)
+	# The moon rises opposite the sun and fills the night with cool light.
+	moon.rotation = Vector3(elev_angle, theta + PI, 0.0)
+	moon.light_energy = moonf * 0.5
 
-	var day := Color("c2ad8e")        # warm LA smog-haze instead of cool grey-blue
+	var day := Color("cfc3ad")        # warm coastal haze without a heavy brown cast
 	var dusk := Color("b06a44")
 	var night := Color("0a0a22")
 	var fog: Color
@@ -5170,14 +5813,23 @@ func _update_daynight() -> void:
 	sky_mat.sky_horizon_color = Color(0.07, 0.05, 0.13).lerp(Color(0.85, 0.80, 0.69), dayk)
 	sky_mat.ground_horizon_color = sky_mat.sky_horizon_color
 	sky_mat.ground_bottom_color = sky_mat.sky_horizon_color.darkened(0.4)
-	# Night floor raised from 0.15 → 0.42 so unlit surfaces don't sink to black;
-	# daytime peak (~0.85) is unchanged.
-	env.ambient_light_energy = 0.42 + dayk * 0.43
+	# Ambient light comes from a COLOR, not the sky: the old sky-sourced
+	# ambient multiplied the near-black night sky, so no energy "floor" could
+	# ever stop nights sinking to pitch black. Guarded on space_state so the
+	# space sky's own flat ambient (see _set_space_sky) is left alone.
+	if space_state == "":
+		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		env.ambient_light_color = Color(0.46, 0.52, 0.68).lerp(Color(0.78, 0.79, 0.78), dayk)
+		env.ambient_light_energy = 0.38 + dayk * 0.22
 
 	var night_amt := clampf(1.0 - (elev + 0.05) * 2.5, 0.0, 1.0)
 	world.window_mat.emission_energy_multiplier = night_amt * 1.2
 	for m in world.lamp_mats:
 		m.emission_energy_multiplier = night_amt * 2.5
+	# Street lamps cast REAL light (72 shadowless omnis city-wide) — glowing
+	# bulb spheres alone never lit the road beneath them.
+	for l in world.lamp_lights:
+		l.light_energy = night_amt * 2.4
 	head_mat.emission_energy_multiplier = 0.06 + night_amt * 0.6
 	tail_mat.emission_energy_multiplier = 0.08 + night_amt * 0.45
 	if world.beacon_mat != null:
@@ -5197,6 +5849,19 @@ func _add_cam_shake(amt: float) -> void:
 
 
 func _update_camera(dt: float) -> void:
+	# Submarine camera: once the hull is below the river surface, switch to a
+	# short blue-green underwater fog volume so the bed and scenery fade with
+	# depth instead of rendering as a dry city street.
+	var underwater: bool = in_car != null and in_car.get("style", "") == "submarine" \
+		and in_car.get("dive", 0.0) > 0.45
+	if underwater:
+		env.fog_enabled = true
+		env.fog_light_color = Color("2f7880")
+		env.fog_density = 0.075
+		env.fog_sky_affect = 0.0
+	else:
+		env.fog_density = 0.0013
+		env.fog_sky_affect = 0.22
 	# Sniper scope: a progressive 0..1 ramp (NOT an instant snap) toward fully
 	# scoped-in, advancing while aiming with the sniper equipped and retreating
 	# the instant either condition drops (weapon switched, L2 released, put the
@@ -5213,6 +5878,41 @@ func _update_camera(dt: float) -> void:
 	var shake := Vector3.ZERO
 	if _shake_amt > 0.001:
 		shake = Vector3(randf() - 0.5, randf() - 0.5, randf() - 0.5) * _shake_amt
+	# Driver (first-person) view — camera rides at the pilot's head, looking
+	# along the vehicle's real heading/pitch/roll. The vehicle model (and, for
+	# the shuttle, its attached stages) is hidden so the view isn't from
+	# inside the mesh; _fpv_restore() puts everything back the moment the
+	# player toggles off or steps out.
+	if camera_fpv and in_car != null:
+		var v = in_car
+		_fpv_hide(v)
+		var vyaw: float = v.yaw
+		var vpitch: float = v.get("pitch", 0.0)
+		var up := 1.35
+		var fwd_off := 0.35
+		if v.get("is_spacecraft", false):
+			up = 2.4
+			fwd_off = 3.0
+		elif v.get("is_rocket", false):
+			up = 30.0
+			fwd_off = 1.5
+		elif v.get("is_heli", false):
+			up = 2.1
+			fwd_off = 1.4
+		elif v.get("is_boat", false):
+			up = 1.8
+			fwd_off = 0.5
+		elif v.is_plane:
+			up = 2.2
+			fwd_off = v.radius * 0.8
+		var head: Vector3 = v.pos + Vector3(sin(vyaw) * fwd_off, up, cos(vyaw) * fwd_off)
+		var fwd_dir := Vector3(sin(vyaw) * cos(vpitch), sin(vpitch), cos(vyaw) * cos(vpitch))
+		camera.position = head + shake
+		camera.look_at(head + fwd_dir * 10.0, Vector3.UP)
+		camera.rotate_object_local(Vector3(0, 0, 1), -v.get("roll", 0.0))
+		camera.fov = lerp(camera.fov, CAM_FOV_HIP, 1.0 - pow(0.6, k))
+		return
+	_fpv_restore()
 	if aiming:
 		# First-person zoomed aim — camera rides at the player's eye, looking
 		# straight down the crosshair; the body is hidden so it never blocks.

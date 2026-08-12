@@ -25,15 +25,17 @@ const OVERTAKE_COOLDOWN := 45.0            # min seconds between "ahead of you a
 # Fictional cast (no real people) spanning ~$5B-$950B so the player has a
 # ladder to climb. Two "aggressive" rivals grow faster and occasionally close
 # a mega-deal that leaps their worth in one tick.
+# "f" marks the women — only used to pick a portrait style on the billboard
+# (see world.gd's ForbesBoardUI face generator).
 const RIVAL_TEMPLATES := [
-	{"name": "Otto Bergmann",    "company": "Bergmann Autowerks",       "worth": 950_000_000_000.0, "style": "aggressive"},
-	{"name": "Eleanor Vance",    "company": "Vance Aerospace",          "worth": 620_000_000_000.0, "style": "steady"},
-	{"name": "Kazuo Tanaka",     "company": "Tanaka Heavy Industries",  "worth": 410_000_000_000.0, "style": "steady"},
-	{"name": "Rex Calloway",     "company": "Calloway Oil",             "worth": 340_000_000_000.0, "style": "aggressive"},
-	{"name": "Priya Nandakumar", "company": "Nandakumar BioGen",        "worth": 95_000_000_000.0,  "style": "steady"},
-	{"name": "Simone Delacroix", "company": "Delacroix Luxe Group",     "worth": 58_000_000_000.0,  "style": "steady"},
-	{"name": "Marcus Whitfield", "company": "Whitfield Media",          "worth": 22_000_000_000.0,  "style": "steady"},
-	{"name": "Ines Okafor",      "company": "Okafor Renewables",        "worth": 5_400_000_000.0,   "style": "steady"},
+	{"name": "Otto Bergmann",    "company": "Bergmann Autowerks",       "worth": 950_000_000_000.0, "style": "aggressive", "f": false},
+	{"name": "Eleanor Vance",    "company": "Vance Aerospace",          "worth": 620_000_000_000.0, "style": "steady",     "f": true},
+	{"name": "Kazuo Tanaka",     "company": "Tanaka Heavy Industries",  "worth": 410_000_000_000.0, "style": "steady",     "f": false},
+	{"name": "Rex Calloway",     "company": "Calloway Oil",             "worth": 340_000_000_000.0, "style": "aggressive", "f": false},
+	{"name": "Priya Nandakumar", "company": "Nandakumar BioGen",        "worth": 95_000_000_000.0,  "style": "steady",     "f": true},
+	{"name": "Simone Delacroix", "company": "Delacroix Luxe Group",     "worth": 58_000_000_000.0,  "style": "steady",     "f": true},
+	{"name": "Marcus Whitfield", "company": "Whitfield Media",          "worth": 22_000_000_000.0,  "style": "steady",     "f": false},
+	{"name": "Ines Okafor",      "company": "Okafor Renewables",        "worth": 5_400_000_000.0,   "style": "steady",     "f": true},
 ]
 
 var rivals: Array = []
@@ -51,7 +53,8 @@ func _ready() -> void:
 func reset() -> void:
 	rivals = []
 	for t in RIVAL_TEMPLATES:
-		rivals.append({"name": t.name, "company": t.company, "worth": t.worth, "style": t.style})
+		rivals.append({"name": t.name, "company": t.company, "worth": t.worth,
+			"style": t.style, "f": t.get("f", false), "alive": true})
 	reached_number_one = false
 	_t = 0.0
 	_overtake_cd = 0.0
@@ -74,6 +77,8 @@ func _tick() -> void:
 	_overtake_cd = maxf(0.0, _overtake_cd - TICK)
 	var player_worth := float(player_net_worth())
 	for r in rivals:
+		if not r.get("alive", true):
+			continue                        # the dead compound no interest
 		var was_ahead: bool = r.worth > player_worth
 		var aggressive: bool = r.style == "aggressive"
 		var drift: float = 0.0026 if aggressive else 0.0009
@@ -101,16 +106,20 @@ func _tick() -> void:
 ## tracking a separate figure, and it means cashing out a big position (or a
 ## venture exit) visibly moves the player's rank.
 func player_net_worth() -> int:
-	return GameState.money + StockMarket.portfolio_value() + Ventures.portfolio_value()
+	return GameState.money + GameState.bank_balance + StockMarket.portfolio_value() + Ventures.portfolio_value()
 
 
 ## Rivals + the player, sorted by worth descending. Each entry:
-## {name, worth, is_player, rank}.
+## {name, company, worth, is_player, f, rank}.
 func ranked_list() -> Array:
 	var entries: Array = []
 	for r in rivals:
-		entries.append({"name": r.name, "worth": r.worth, "is_player": false})
-	entries.append({"name": "YOU", "worth": float(player_net_worth()), "is_player": true})
+		if not r.get("alive", true):
+			continue                        # assassinated tycoons leave the list
+		entries.append({"name": r.name, "company": r.company, "worth": r.worth,
+			"is_player": false, "f": r.get("f", false)})
+	entries.append({"name": "YOU", "company": "Free Harbor Holdings",
+		"worth": float(player_net_worth()), "is_player": true, "f": false})
 	entries.sort_custom(func(a, b): return a.worth > b.worth)
 	for i in entries.size():
 		entries[i]["rank"] = i + 1
@@ -122,6 +131,33 @@ func player_rank() -> int:
 		if e.is_player:
 			return e.rank
 	return rivals.size() + 1
+
+
+## Assassination: mark rival `rname` dead and hand back the fortune the
+## killer inherits. Returns 0 if they don't exist or are already dead.
+func kill_rival(rname: String) -> float:
+	for r in rivals:
+		if r.name == rname and r.get("alive", true):
+			r.alive = false
+			updated.emit()
+			return r.worth
+	return 0.0
+
+
+## The player died to `rname`'s people — the rival absorbs the dropped cash.
+func absorb_player_cash(rname: String, amount: float) -> void:
+	for r in rivals:
+		if r.name == rname and r.get("alive", true):
+			r.worth = clampf(r.worth + amount, MIN_WORTH, MAX_WORTH)
+			updated.emit()
+			return
+
+
+func rival_alive(rname: String) -> bool:
+	for r in rivals:
+		if r.name == rname:
+			return r.get("alive", true)
+	return false
 
 
 ## The live text every FORBES banner in world.gd displays — top 5, plus the

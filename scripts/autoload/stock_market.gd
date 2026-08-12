@@ -9,7 +9,10 @@ extends Node
 signal updated
 
 const TICK := 1.6              # real seconds between market ticks
-const MAX_PRICE := 8_000_000.0
+# Safety backstop only — the real ceiling is SOFT: rallies lose power the
+# further price stretches above its anchor (see _tick), so tops form
+# naturally instead of the old flat line pinned at a magic number.
+const MAX_PRICE := 500_000_000.0
 const MIN_PRICE := 0.02
 const HIST := 90               # price-history samples kept per stock (sparkline)
 
@@ -31,6 +34,10 @@ func reset() -> void:
 		_mk("FlyUS Airways",     "FLY",  16.0, 0.046, -0.0006, 0.0120, 0.40),
 		_mk("Bawsaq Crypto",     "BWC",   6.5, 0.078,  0.0011, 0.0230, 0.56),
 		_mk("RastaPasta",        "RAS",   1.2, 0.092,  0.0009, 0.0270, 0.53),
+		# The lunar commodity — He-3 mined at the moon base sells at this
+		# ticker's LIVE price (game.gd's fuel-depot kiosk), so a run timed
+		# into a rally pays multiples. Tradeable as a normal ticker too.
+		_mk("Helium-3 Futures",  "HE3", 35_000.0, 0.045, 0.0007, 0.0080, 0.55),
 	]
 	_t = 0.0
 	updated.emit()
@@ -39,7 +46,7 @@ func _mk(nm: String, sym: String, price: float, vol: float, drift: float,
 		event: float, rally_bias: float) -> Dictionary:
 	return {
 		"name": nm, "symbol": sym, "price": price, "open": price,
-		"base": price, "prev": price, "vol": vol, "drift": drift,
+		"base": price, "home": price, "prev": price, "vol": vol, "drift": drift,
 		"event": event, "rally_bias": rally_bias,
 		"owned": 0.0, "spent": 0.0,
 		"mode": "normal", "mode_ticks": 0, "rate": 0.0,
@@ -59,10 +66,21 @@ func _tick() -> void:
 	for s in stocks:
 		s.prev = s.price
 		if s.mode == "normal":
-			# Gentle random walk with mild mean-reversion toward the anchor.
-			var revert: float = (log(s.base) - log(s.price)) * 0.02
+			# Random walk with REAL mean-reversion toward the anchor — strong
+			# enough that the market cycles between booms and busts long-term
+			# instead of ratcheting monotonically up to the price ceiling.
+			var revert: float = (log(s.base) - log(s.price)) * 0.06
 			var step: float = s.drift + revert + randfn(0.0, s.vol)
+			if step > 0.0:
+				# Headroom damping — gains shrink as the backstop nears, so
+				# the hard clamp is an asymptote, never a wall prices sit on.
+				step *= clampf(1.0 - s.price / MAX_PRICE, 0.0, 1.0)
 			s.price *= clampf(1.0 + step, 0.55, 1.7)
+			# The anchor itself slowly sinks back toward the ticker's original
+			# listing price — events can still double it (see below), but
+			# without this decay ~half of events double base and the market
+			# still ratchets to the backstop over a long session, just slower.
+			s.base = lerpf(s.base, s.home, 0.0015)
 			# Roll for a dramatic rally or crash run.
 			if randf() < s.event:
 				if randf() < s.rally_bias:
@@ -74,19 +92,53 @@ func _tick() -> void:
 					s.mode_ticks = 5 + randi() % 16
 					s.rate = -(0.09 + randf() * 0.26)
 		else:
-			# In an event run: a strong per-tick move plus noise.
+			# In an event run: a strong per-tick move plus noise — but with
+			# overextension damping: the further price has already run above
+			# its anchor, the less power the rally has left. This is the SOFT
+			# ceiling that replaces the old hard clamp wall (a stock tagged
+			# RALLY could sit pinned at MAX_PRICE with its number frozen).
 			var jitter: float = randfn(0.0, s.vol * 0.5)
-			s.price *= maxf(0.04, 1.0 + s.rate + jitter)
+			var eff_rate: float = s.rate
+			var stretch: float = s.price / maxf(s.base, MIN_PRICE)
+			if s.rate > 0.0 and stretch > 3.0:
+				eff_rate = s.rate / (1.0 + (stretch - 3.0) * 0.6)
+			# Headroom damping on the WHOLE upward multiplier (rate + noise —
+			# damping only the rate let jitter bump prices onto the clamp):
+			# gains shrink to zero as the backstop nears, making it a true
+			# asymptote rather than a wall prices sit on.
+			var mult: float = maxf(0.04, 1.0 + eff_rate + jitter)
+			if mult > 1.0:
+				mult = 1.0 + (mult - 1.0) * clampf(1.0 - s.price / MAX_PRICE, 0.0, 1.0)
+			s.price *= mult
 			s.mode_ticks -= 1
 			if s.mode_ticks <= 0:
 				s.mode = "normal"
-				# After a violent move the anchor drifts toward the new reality.
-				s.base = lerpf(s.base, s.price, 0.4)
+				# The anchor drifts toward the new reality, but only so far
+				# per event (at most halved/doubled) — otherwise every rally
+				# permanently ratchets the anchor up and reversion never gets
+				# to pull the market back down.
+				s.base = clampf(lerpf(s.base, s.price, 0.25),
+					s.base * 0.5, s.base * 2.0)
+		# The anchor lives in an absolute band around the original listing
+		# price — chained rally-doublings can't walk it (and therefore the
+		# sustainable price) off to the backstop over a long session. A stock
+		# can still 2000x its listing at the top of a mania, but the mania
+		# always has somewhere to crash back to.
+		s.base = clampf(s.base, s.home * 0.05, s.home * 2000.0)
 		s.price = clampf(s.price, MIN_PRICE, MAX_PRICE)
 		s.history.append(s.price)
 		if s.history.size() > HIST:
 			s.history.pop_front()
 	updated.emit()
+
+## Live price of a ticker by symbol — 0.0 if unknown. Used by the He-3
+## cargo buyer so lunar hauls settle at the real market price.
+func price_of(symbol: String) -> float:
+	for s in stocks:
+		if s.symbol == symbol:
+			return s.price
+	return 0.0
+
 
 ## Spend `cash` dollars on stock `idx`, buying fractional shares at the live
 ## price. Cash is capped at what the player actually has. Returns shares bought.

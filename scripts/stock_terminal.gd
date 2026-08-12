@@ -39,7 +39,11 @@ var _open := false
 
 # List-view widgets
 var _list_cash: Label
+var _frozen_banner: Label
 var _list_port: Label
+var _bank_value: Label
+var _bank_input: LineEdit
+var _bank_note: Label
 var _list_rows: Array = []
 
 # Detail-view widgets
@@ -161,6 +165,41 @@ func _build_list() -> PanelContainer:
 	_list_port = _stat_box(head, "PORTFOLIO", TEXT)
 
 	col.add_child(_rule())
+	var bank_row := HBoxContainer.new()
+	bank_row.add_theme_constant_override("separation", 10)
+	col.add_child(bank_row)
+	var bank_title := _lbl("INSURED CASH RESERVE", 15, GOLD)
+	bank_title.custom_minimum_size = Vector2(220, 42)
+	bank_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	bank_row.add_child(bank_title)
+	_bank_value = _lbl("$0", 18, MONEY)
+	_bank_value.custom_minimum_size = Vector2(150, 42)
+	_bank_value.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	bank_row.add_child(_bank_value)
+	_bank_input = LineEdit.new()
+	_bank_input.placeholder_text = "amount"
+	_bank_input.custom_minimum_size = Vector2(150, 42)
+	_bank_input.alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	bank_row.add_child(_bank_input)
+	var dep := _make_button("DEPOSIT", 130, MONEY)
+	dep.pressed.connect(_deposit_bank)
+	bank_row.add_child(dep)
+	var wit := _make_button("WITHDRAW", 140, TEXT)
+	wit.pressed.connect(_withdraw_bank)
+	bank_row.add_child(wit)
+	_bank_note = _lbl("Insured against death; no market exposure.", 13, DIM)
+	_bank_note.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	col.add_child(_bank_note)
+
+	col.add_child(_rule())
+
+	# Asset-seizure banner — the market watchdog freezes the account while
+	# the player is running hot (see game.gd's seizure logic).
+	_frozen_banner = _lbl("⚠  ACCOUNT FROZEN — MARKET WATCHDOG. Lose the police heat to trade.",
+		16, DOWN)
+	_frozen_banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_frozen_banner.visible = false
+	col.add_child(_frozen_banner)
 
 	var ch := HBoxContainer.new()
 	ch.add_theme_constant_override("separation", 16)
@@ -267,9 +306,14 @@ func _build_row(idx: int) -> PanelContainer:
 
 	_list_rows.append({
 		"price": price, "chg": chg, "sig": sig, "hold": hold, "sell": sell,
-		"spark": spark,
+		"buy": buy, "spark": spark,
 	})
 	return wrap
+
+
+## True while the market watchdog has the account frozen — wanted 4 stars up.
+func _frozen() -> bool:
+	return GameState.wanted >= 3.5
 
 
 ## A fixed colour per stock for its sector badge.
@@ -443,6 +487,10 @@ func _show_detail(idx: int) -> void:
 
 
 func _open_order(idx: int, kind: String) -> void:
+	if _frozen():
+		AudioFX.hit()
+		_refresh()
+		return
 	var s: Dictionary = StockMarket.stocks[idx]
 	if kind == "sell" and s.owned <= 0.0:
 		return
@@ -496,6 +544,10 @@ func _quick(i: int) -> void:
 
 
 func _place_order() -> void:
+	if _frozen():
+		AudioFX.hit()
+		_close_order()
+		return
 	var s: Dictionary = StockMarket.stocks[_order_idx]
 	var done := false
 	if _order_kind == "buy":
@@ -605,9 +657,13 @@ func _refresh() -> void:
 func _refresh_list() -> void:
 	_list_cash.text = "$" + _commas(GameState.money)
 	_list_port.text = "$" + _commas(StockMarket.portfolio_value())
+	_bank_value.text = "$" + _commas(GameState.bank_balance)
+	_bank_note.text = "Insured against death; no market exposure."
+	_frozen_banner.visible = _frozen()
 	for i in _list_rows.size():
 		var s: Dictionary = StockMarket.stocks[i]
 		var r: Dictionary = _list_rows[i]
+		r.buy.disabled = _frozen()
 		var tint: Color = UP if s.price >= s.open else DOWN
 		r.price.text = "$" + _price_str(s.price)
 		r.chg.text = _pct_str(s)
@@ -627,7 +683,34 @@ func _refresh_list() -> void:
 				_commas(int(round(s.owned * s.price)))]
 		else:
 			r.hold.text = "--"
-		r.sell.disabled = s.owned <= 0.0
+		r.sell.disabled = s.owned <= 0.0 or _frozen()
+
+func _bank_amount() -> int:
+	return maxi(0, int(_bank_input.text.replace(",", "").replace("$", "").strip_edges()))
+
+func _deposit_bank() -> void:
+	var amount := mini(_bank_amount(), GameState.money)
+	if amount <= 0:
+		_bank_note.text = "Enter an amount up to your available cash."
+		return
+	GameState.money -= amount
+	GameState.bank_balance += amount
+	_bank_input.clear()
+	_bank_note.text = "$%s moved into insured reserve." % _commas(amount)
+	AudioFX.coin()
+	_refresh()
+
+func _withdraw_bank() -> void:
+	var amount := mini(_bank_amount(), GameState.bank_balance)
+	if amount <= 0:
+		_bank_note.text = "Enter an amount up to your insured reserve."
+		return
+	GameState.bank_balance -= amount
+	GameState.money += amount
+	_bank_input.clear()
+	_bank_note.text = "$%s withdrawn to spend." % _commas(amount)
+	AudioFX.coin()
+	_refresh()
 
 
 func _refresh_detail() -> void:

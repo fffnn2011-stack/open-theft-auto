@@ -67,6 +67,10 @@ const ACTIONS := [
 		"key": KEY_UP, "mouse": 0, "pad": -1},
 	{"name": "fly_down", "label": "Fly / Descend Down", "group": "Suit & Flight",
 		"key": KEY_DOWN, "mouse": 0, "pad": -1},
+	{"name": "landing_gear", "label": "Landing Gear (Plane)", "group": "Suit & Flight",
+		"key": KEY_B, "mouse": 0, "pad": JOY_BUTTON_LEFT_STICK},
+	{"name": "camera_view", "label": "Driver / Chase Camera", "group": "Driving",
+		"key": KEY_X, "mouse": 0, "pad": JOY_BUTTON_TOUCHPAD},
 ]
 
 ## Extra keyboard fallback events kept alongside an action's primary default

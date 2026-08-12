@@ -58,13 +58,16 @@ func save_now() -> void:
 	# matching by name is robust to the cast changing shape later).
 	var forbes_rivals := []
 	for r in Forbes.rivals:
-		forbes_rivals.append({"name": r.name, "worth": r.worth})
+		forbes_rivals.append({"name": r.name, "worth": r.worth,
+			"alive": r.get("alive", true)})
 
 	var d := {
 		"money": GameState.money,
+		"bank_balance": GameState.bank_balance,
 		"weapon_idx": GameState.weapon_idx,
 		"ammo": ammo,
 		"owned_vehicles": Garage.owned_vehicles,
+		"impounded": Garage.impounded,
 		"suit_tier": Garage.suit_tier,
 		"properties": Garage.properties,
 		"active_property": Garage.active_property,
@@ -76,6 +79,9 @@ func save_now() -> void:
 		"venture_portfolio": venture_portfolio,
 		"venture_realised": Ventures.realised,
 		"milestones_hit": GameState.milestones_hit,
+		"island_stage": GameState.island_stage,
+		"island_progress": GameState.island_progress,
+		"he3_cargo": GameState.he3_cargo,
 		"forbes_rivals": forbes_rivals,
 		"forbes_reached_1": Forbes.reached_number_one,
 	}
@@ -100,6 +106,7 @@ func load_into() -> bool:
 		return false
 
 	GameState.money = int(d.get("money", GameState.money))
+	GameState.bank_balance = maxi(0, int(d.get("bank_balance", 0)))
 	GameState.weapon_idx = int(d.get("weapon_idx", 2))
 	GameState.init_weapon_ammo()
 	var ammo = d.get("ammo", {})
@@ -108,9 +115,14 @@ func load_into() -> bool:
 			GameState.weapon_ammo[k] = ammo[k]
 
 	Garage.owned_vehicles = _int_array(d.get("owned_vehicles", []))
+	Garage.impounded = _int_array(d.get("impounded", []))
 	Garage.suit_tier = int(d.get("suit_tier", 1))
 	Garage.properties = _int_array(d.get("properties", []))
 	Garage.active_property = int(d.get("active_property", -1))
+
+	GameState.island_stage = clampi(int(d.get("island_stage", 0)), 0, 3)
+	GameState.island_progress = clampf(float(d.get("island_progress", 0.0)), 0.0, 1.0)
+	GameState.he3_cargo = maxf(0.0, float(d.get("he3_cargo", 0.0)))
 
 	GameState.respect = clampf(float(d.get("respect", GameState.respect)), 0.0, 100.0)
 	GameState.happiness = clampf(float(d.get("happiness", GameState.happiness)), 0.0, 100.0)
@@ -190,6 +202,7 @@ func load_into() -> bool:
 				if r.name == row.get("name", ""):
 					r.worth = clampf(float(row.get("worth", r.worth)),
 							Forbes.MIN_WORTH, Forbes.MAX_WORTH)
+					r.alive = bool(row.get("alive", true))
 					break
 		Forbes.updated.emit()
 	return true

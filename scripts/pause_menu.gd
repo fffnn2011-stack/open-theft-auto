@@ -529,63 +529,60 @@ func _make_chip(text: String) -> Button:
 
 
 # =====================================================================
-# Controller diagram — a read-only DualSense (PS5) reference map.
-#
-# This is no longer the assignment surface (that's the action list above);
-# it's just a labeled picture of the current controller scheme. Rebindable
-# labels use InputConfig.action_bound_to_pad_button() to reverse-look-up
-# whatever action currently owns each physical button, so the diagram stays
-# accurate even after the player rebinds things away from their defaults.
-# Purely analog/hardcoded controls (sticks, triggers, Sprint's Cross
-# fallback, the redundant D-Pad left/right weapon switch, Options opening
-# the pause menu) are drawn as fixed labels since they're never rebindable.
+# Controller diagram — read-only DualSense (PS5) reference map.
+# Silhouette and control layout match a DualSense: wide touchpad, offset
+# sticks, cross d-pad, diamond face buttons, shoulder/trigger stacks.
+# Labels reverse-look-up live pad bindings via InputConfig.
 # =====================================================================
 class GamepadDiagram extends Control:
-	const SIZE := Vector2(940, 280)
-	const BODY_COLOR := Color(0.14, 0.15, 0.18)
-	const BODY_EDGE := Color(0.46, 0.62, 0.58, 0.85)
-	const STICK_COLOR := Color(0.20, 0.22, 0.26)
-	const STICK_EDGE := Color(0.48, 0.51, 0.56)
-	const LINE_COLOR := Color(0.42, 0.62, 0.55, 0.45)
-	const FIXED_COLOR := Color(0.55, 0.57, 0.6)
+	const SIZE := Vector2(960, 300)
+	const BODY_FILL := Color(0.11, 0.12, 0.15)
+	const BODY_MID := Color(0.16, 0.17, 0.21)
+	const BODY_EDGE := Color(0.72, 0.76, 0.80, 0.92)
+	const BODY_EDGE_SOFT := Color(0.45, 0.50, 0.55, 0.55)
+	const STICK_FILL := Color(0.18, 0.19, 0.23)
+	const STICK_RIM := Color(0.55, 0.58, 0.62)
+	const PAD_FILL := Color(0.20, 0.21, 0.25)
+	const LINE_COLOR := Color(0.55, 0.72, 0.68, 0.55)
+	const FIXED_COLOR := Color(0.62, 0.64, 0.68)
 	const LIVE_COLOR := Color("6fd4c6")
+	const ACCENT := Color(0.55, 0.85, 0.95, 0.9)
 
-	const CENTER_X := 470.0
-	const BODY_TOP := 30.0
+	const CX := 480.0
+	const CY := 28.0
 
-	# Right-half body silhouette, relative to (CENTER_X, BODY_TOP) — a narrow
-	# top-center waist sweeping down and out into a large bulbous lower grip.
-	# Mirrored (x negated) and reversed to close the left half in _draw().
-	const BODY_RIGHT_HALF := [
-		Vector2(0, 0), Vector2(92, 4), Vector2(152, 18), Vector2(178, 50),
-		Vector2(182, 86), Vector2(198, 122), Vector2(218, 154), Vector2(206, 182),
-		Vector2(162, 200), Vector2(96, 192), Vector2(38, 174), Vector2(0, 162),
+	# DualSense-like right half (from top-center, clockwise around the grip).
+	# Dense points → smooth outer curve instead of a blocky polygon.
+	const BODY_RIGHT := [
+		Vector2(0, 4), Vector2(38, 2), Vector2(78, 4), Vector2(118, 12),
+		Vector2(148, 28), Vector2(168, 48), Vector2(178, 72), Vector2(182, 98),
+		Vector2(186, 122), Vector2(198, 148), Vector2(212, 168), Vector2(218, 188),
+		Vector2(210, 208), Vector2(188, 220), Vector2(158, 226), Vector2(128, 222),
+		Vector2(98, 210), Vector2(72, 196), Vector2(48, 184), Vector2(28, 176),
+		Vector2(12, 172), Vector2(0, 170),
 	]
 
-	# Physical-control points, in diagram space.
-	const P_L2 := Vector2(280, 4)
-	const P_L1 := Vector2(280, 22)
-	const P_R2 := Vector2(660, 4)
-	const P_R1 := Vector2(660, 22)
-	const P_DPAD := Vector2(320, 100)
-	const P_LSTICK := Vector2(398, 182)
-	const P_RSTICK := Vector2(542, 182)
-	const P_TOUCHPAD := Vector2(470, 68)
-	const P_SHARE := Vector2(378, 62)
-	const P_OPTIONS := Vector2(562, 62)
-	const P_TRIANGLE := Vector2(620, 76)
-	const P_CIRCLE := Vector2(646, 100)
-	const P_SQUARE := Vector2(596, 100)
-	const P_CROSS := Vector2(620, 124)
-	# Back paddles sit on the underside of the grips — no front-facing spot to
-	# put them, so their reference lines point at the base of each grip.
-	const P_PADDLE_L := Vector2(300, 190)
-	const P_PADDLE_R := Vector2(640, 190)
+	# Control anchors (diagram space) — DualSense proportions.
+	const P_L2 := Vector2(292, 8)
+	const P_L1 := Vector2(292, 28)
+	const P_R2 := Vector2(668, 8)
+	const P_R1 := Vector2(668, 28)
+	const P_CREATE := Vector2(372, 78)       # Create / Share
+	const P_OPTIONS := Vector2(588, 78)
+	const P_TOUCH := Vector2(480, 88)
+	const P_PS := Vector2(480, 128)          # PS button under touchpad
+	const P_MUTE := Vector2(480, 148)
+	const P_DPAD := Vector2(348, 128)
+	const P_FACE := Vector2(612, 120)        # center of face cluster
+	const P_LSTICK := Vector2(400, 188)
+	const P_RSTICK := Vector2(560, 188)
+	const P_PADDLE_L := Vector2(310, 210)
+	const P_PADDLE_R := Vector2(650, 210)
 
 	var _left_entries := []
 	var _right_entries := []
 	var _lines := []
-	var _live_entries := []   # entries with a "pad_button" key needing refresh()
+	var _live_entries := []
 
 
 	func _ready() -> void:
@@ -593,9 +590,9 @@ class GamepadDiagram extends Control:
 		_left_entries = [
 			{"fixed": "Brake / Reverse", "glyph": "L2", "point": P_L2},
 			{"pad_button": JOY_BUTTON_LEFT_SHOULDER, "glyph": "L1", "point": P_L1},
-			{"pad_button": JOY_BUTTON_BACK, "glyph": "SHARE", "point": P_SHARE},
-			{"pad_button": JOY_BUTTON_DPAD_UP, "glyph": "D-PAD ↑", "point": P_DPAD + Vector2(0, -18)},
-			{"pad_button": JOY_BUTTON_DPAD_DOWN, "glyph": "D-PAD ↓", "point": P_DPAD + Vector2(0, 18)},
+			{"pad_button": JOY_BUTTON_BACK, "glyph": "CREATE", "point": P_CREATE},
+			{"pad_button": JOY_BUTTON_DPAD_UP, "glyph": "D-PAD ↑", "point": P_DPAD + Vector2(0, -16)},
+			{"pad_button": JOY_BUTTON_DPAD_DOWN, "glyph": "D-PAD ↓", "point": P_DPAD + Vector2(0, 16)},
 			{"fixed": "Weapon Prev / Next", "glyph": "D-PAD ← →", "point": P_DPAD},
 			{"fixed": "Move / Steer", "glyph": "L STICK", "point": P_LSTICK},
 			{"pad_button": JOY_BUTTON_PADDLE1, "glyph": "PADDLE L", "point": P_PADDLE_L},
@@ -604,10 +601,10 @@ class GamepadDiagram extends Control:
 			{"fixed": "Accelerate", "glyph": "R2", "point": P_R2},
 			{"pad_button": JOY_BUTTON_RIGHT_SHOULDER, "glyph": "R1", "point": P_R1},
 			{"fixed": "Pause Menu", "glyph": "OPTIONS", "point": P_OPTIONS},
-			{"pad_button": JOY_BUTTON_Y, "glyph": "△", "point": P_TRIANGLE},
-			{"pad_button": JOY_BUTTON_B, "glyph": "○", "point": P_CIRCLE},
-			{"pad_button": JOY_BUTTON_X, "glyph": "□", "point": P_SQUARE},
-			{"fixed": "Sprint / Boost (fallback)", "glyph": "✕", "point": P_CROSS},
+			{"pad_button": JOY_BUTTON_Y, "glyph": "△", "point": P_FACE + Vector2(0, -22)},
+			{"pad_button": JOY_BUTTON_B, "glyph": "○", "point": P_FACE + Vector2(22, 0)},
+			{"pad_button": JOY_BUTTON_X, "glyph": "□", "point": P_FACE + Vector2(-22, 0)},
+			{"fixed": "Sprint / Boost (fallback)", "glyph": "✕", "point": P_FACE + Vector2(0, 22)},
 			{"fixed": "Camera Look", "glyph": "R STICK", "point": P_RSTICK},
 			{"pad_button": JOY_BUTTON_PADDLE2, "glyph": "PADDLE R", "point": P_PADDLE_R},
 		]
@@ -616,39 +613,35 @@ class GamepadDiagram extends Control:
 
 
 	func _build_widgets() -> void:
-		var y := 6.0
+		var y := 4.0
 		for e in _left_entries:
-			_add_entry(e, Vector2(8, y), "left")
-			y += 30.0
-		y = 6.0
+			_add_entry(e, Vector2(6, y), "left")
+			y += 28.0
+		y = 4.0
 		for e in _right_entries:
-			_add_entry(e, Vector2(708, y), "right")
-			y += 30.0
+			_add_entry(e, Vector2(730, y), "right")
+			y += 28.0
 
 
 	func _add_entry(e: Dictionary, pos: Vector2, side: String) -> void:
 		var lbl := Label.new()
-		lbl.add_theme_font_size_override("font_size", 13)
-		lbl.custom_minimum_size = Vector2(224, 26)
+		lbl.add_theme_font_size_override("font_size", 12)
+		lbl.custom_minimum_size = Vector2(220, 24)
 		lbl.position = pos
 		lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT if side == "left" else HORIZONTAL_ALIGNMENT_LEFT
 		if e.has("fixed"):
-			lbl.text = "%s   %s" % [e.glyph, e.fixed]
+			lbl.text = "%s  %s" % [e.glyph, e.fixed]
 			lbl.add_theme_color_override("font_color", FIXED_COLOR)
 		else:
 			lbl.add_theme_color_override("font_color", LIVE_COLOR)
 			e["_label"] = lbl
 			_live_entries.append(e)
 		add_child(lbl)
-		var line_start := (pos + Vector2(224, 13)) if side == "left" else (pos + Vector2(0, 13))
+		var line_start := (pos + Vector2(220, 12)) if side == "left" else (pos + Vector2(0, 12))
 		_lines.append({"a": line_start, "b": e.point})
 
 
-	## Re-pull whichever action currently owns each physical button (so a
-	## rebind away from the default shows up correctly here too), and
-	## redraw. No capture-state handling needed — this diagram never enters
-	## capture mode, that only happens on the action list's chips.
 	func refresh() -> void:
 		for e in _live_entries:
 			var action: String = InputConfig.action_bound_to_pad_button(e.pad_button)
@@ -656,103 +649,179 @@ class GamepadDiagram extends Control:
 			if action == "":
 				text = "(unassigned)"
 			elif action == "interact" or action == "handbrake":
-				# Interact and Handbrake share Square by design (never both
-				# needed at once — one's on foot at a kiosk, the other mid-drive).
 				text = "Interact / Handbrake"
 			else:
 				text = InputConfig.label_for(action)
 			var lbl: Label = e._label
-			lbl.text = "%s   %s" % [e.glyph, text]
+			lbl.text = "%s  %s" % [e.glyph, text]
 		queue_redraw()
 
 
 	func _draw() -> void:
+		# Leader lines with endpoint dots (reference-card style).
 		for l in _lines:
-			draw_line(l.a, l.b, LINE_COLOR, 1.5)
+			draw_line(l.a, l.b, LINE_COLOR, 1.25, true)
+			draw_circle(l.b, 2.4, ACCENT)
 
-		# Body — one closed polygon (no seams) built from BODY_RIGHT_HALF,
-		# mirrored for the left side.
-		var origin := Vector2(CENTER_X, BODY_TOP)
-		var body_pts := PackedVector2Array()
-		for p in BODY_RIGHT_HALF:
-			body_pts.append(origin + p)
-		for i in range(BODY_RIGHT_HALF.size() - 2, 0, -1):
-			var p: Vector2 = BODY_RIGHT_HALF[i]
-			body_pts.append(origin + Vector2(-p.x, p.y))
-		draw_colored_polygon(body_pts, BODY_COLOR)
-		var closed := body_pts.duplicate()
-		closed.append(body_pts[0])
-		draw_polyline(closed, BODY_EDGE, 1.6, true)
-
-		# Shoulder bumpers (L1/R1) and trigger shapes (L2/R2) on the top edge.
-		_pill(P_L2)
-		_pill(P_L1)
-		_pill(P_R2)
-		_pill(P_R1)
-
-		# Touchpad, center-top between the two button clusters.
-		var pad_sb := StyleBoxFlat.new()
-		pad_sb.bg_color = Color(0.18, 0.19, 0.22)
-		pad_sb.border_color = BODY_EDGE
-		pad_sb.set_border_width_all(1)
-		pad_sb.set_corner_radius_all(6)
-		draw_style_box(pad_sb, Rect2(P_TOUCHPAD - Vector2(76, 22), Vector2(152, 44)))
-
-		# Share / Options flanking the touchpad.
-		draw_circle(P_SHARE, 7, STICK_COLOR)
-		draw_arc(P_SHARE, 7, 0, TAU, 16, STICK_EDGE, 1.4)
-		draw_circle(P_OPTIONS, 7, STICK_COLOR)
-		draw_arc(P_OPTIONS, 7, 0, TAU, 16, STICK_EDGE, 1.4)
-
-		# D-Pad — four separate arrow keys, not one cross.
-		_dpad_key(P_DPAD + Vector2(0, -18), "↑")
-		_dpad_key(P_DPAD + Vector2(0, 18), "↓")
-		_dpad_key(P_DPAD + Vector2(-18, 0), "←")
-		_dpad_key(P_DPAD + Vector2(18, 0), "→")
-
-		# Face buttons — △ top, ○ right, □ left, ✕ bottom.
-		draw_circle(P_TRIANGLE, 14, STICK_COLOR)
-		draw_arc(P_TRIANGLE, 14, 0, TAU, 24, STICK_EDGE, 1.4)
-		draw_circle(P_CIRCLE, 14, STICK_COLOR)
-		draw_arc(P_CIRCLE, 14, 0, TAU, 24, STICK_EDGE, 1.4)
-		draw_circle(P_SQUARE, 14, STICK_COLOR)
-		draw_arc(P_SQUARE, 14, 0, TAU, 24, STICK_EDGE, 1.4)
-		draw_circle(P_CROSS, 14, STICK_COLOR)
-		draw_arc(P_CROSS, 14, 0, TAU, 24, STICK_EDGE, 1.4)
-		_glyph(P_TRIANGLE, "△", Color("8fb4e6"))
-		_glyph(P_CIRCLE, "○", Color("e68fa0"))
-		_glyph(P_SQUARE, "□", Color("e6c88f"))
-		_glyph(P_CROSS, "✕", Color("8fe6b0"))
-
-		# Thumbsticks — low and inboard, side by side.
-		draw_circle(P_LSTICK, 26, STICK_COLOR)
-		draw_arc(P_LSTICK, 26, 0, TAU, 28, STICK_EDGE, 1.8)
-		draw_circle(P_LSTICK, 11, Color(0.25, 0.27, 0.31))
-		draw_circle(P_RSTICK, 26, STICK_COLOR)
-		draw_arc(P_RSTICK, 26, 0, TAU, 28, STICK_EDGE, 1.8)
-		draw_circle(P_RSTICK, 11, Color(0.25, 0.27, 0.31))
-
-		# Speaker dots — a small flourish low on the body between the sticks.
-		for i in range(5):
-			draw_circle(Vector2(CENTER_X - 8 + i * 4, BODY_TOP + 208), 1.2, BODY_EDGE)
+		_draw_dualsense_body()
+		_draw_shoulders()
+		_draw_touchpad()
+		_draw_system_buttons()
+		_draw_dpad()
+		_draw_face_buttons()
+		_draw_sticks()
+		_draw_speaker()
 
 
-	func _pill(p: Vector2) -> void:
+	## Closed DualSense silhouette: smooth outer curve, soft inner shade.
+	func _draw_dualsense_body() -> void:
+		var origin := Vector2(CX, CY)
+		var outer := PackedVector2Array()
+		for p in BODY_RIGHT:
+			outer.append(origin + p)
+		for i in range(BODY_RIGHT.size() - 2, 0, -1):
+			var p: Vector2 = BODY_RIGHT[i]
+			outer.append(origin + Vector2(-p.x, p.y))
+		# Soft under-glow plate.
+		var shadow := PackedVector2Array()
+		for p in outer:
+			shadow.append(p + Vector2(0, 3))
+		draw_colored_polygon(shadow, Color(0, 0, 0, 0.28))
+		draw_colored_polygon(outer, BODY_FILL)
+		# Inner face plate (slightly inset) for depth.
+		var inner := PackedVector2Array()
+		for p in outer:
+			var mid := Vector2(CX, CY + 100)
+			inner.append(p.lerp(mid, 0.08))
+		draw_colored_polygon(inner, BODY_MID)
+		var closed := outer.duplicate()
+		closed.append(outer[0])
+		draw_polyline(closed, BODY_EDGE, 2.0, true)
+		# Subtle top edge highlight.
+		draw_line(origin + Vector2(-70, 6), origin + Vector2(70, 6),
+			Color(1, 1, 1, 0.08), 2.0, true)
+
+
+	func _draw_shoulders() -> void:
+		# L2 / R2 — taller trigger capsules above the body.
+		_shoulder_capsule(P_L2, true)
+		_shoulder_capsule(P_R2, true)
+		# L1 / R1 — flatter bumpers.
+		_shoulder_capsule(P_L1, false)
+		_shoulder_capsule(P_R1, false)
+
+
+	func _shoulder_capsule(p: Vector2, trigger: bool) -> void:
+		var w := 72.0 if trigger else 68.0
+		var h := 18.0 if trigger else 14.0
 		var sb := StyleBoxFlat.new()
-		sb.bg_color = Color(0.18, 0.19, 0.22)
+		sb.bg_color = Color(0.17, 0.18, 0.22)
 		sb.border_color = BODY_EDGE
 		sb.set_border_width_all(1)
-		sb.set_corner_radius_all(8)
-		draw_style_box(sb, Rect2(p - Vector2(38, 8), Vector2(76, 16)))
+		sb.set_corner_radius_all(int(h * 0.5))
+		draw_style_box(sb, Rect2(p - Vector2(w * 0.5, h * 0.5), Vector2(w, h)))
+		if trigger:
+			# Inner trigger groove.
+			draw_line(p + Vector2(-18, 0), p + Vector2(18, 0), BODY_EDGE_SOFT, 1.2, true)
 
 
-	func _dpad_key(p: Vector2, glyph: String) -> void:
-		draw_rect(Rect2(p - Vector2(11, 11), Vector2(22, 22)), STICK_COLOR)
-		draw_rect(Rect2(p - Vector2(11, 11), Vector2(22, 22)), STICK_EDGE, false, 1.4)
+	func _draw_touchpad() -> void:
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = PAD_FILL
+		sb.border_color = BODY_EDGE
+		sb.set_border_width_all(1)
+		sb.set_corner_radius_all(10)
+		# DualSense touchpad is wide and relatively short.
+		draw_style_box(sb, Rect2(P_TOUCH - Vector2(86, 28), Vector2(172, 56)))
+		# Soft glass sheen.
+		draw_line(P_TOUCH + Vector2(-70, -14), P_TOUCH + Vector2(40, -14),
+			Color(1, 1, 1, 0.10), 2.0, true)
+		# Light bar under the pad.
+		draw_line(P_TOUCH + Vector2(-50, 30), P_TOUCH + Vector2(50, 30),
+			Color(0.35, 0.75, 0.95, 0.55), 2.5, true)
+
+
+	func _draw_system_buttons() -> void:
+		# Create (left) / Options (right) — small pill buttons.
+		_sys_pill(P_CREATE)
+		_sys_pill(P_OPTIONS)
+		# PS button.
+		draw_circle(P_PS, 9, STICK_FILL)
+		draw_arc(P_PS, 9, 0, TAU, 20, STICK_RIM, 1.3, true)
+		_glyph(P_PS, "PS", FIXED_COLOR, 10)
+		# Mute mic button under PS.
+		draw_circle(P_MUTE, 5, STICK_FILL)
+		draw_arc(P_MUTE, 5, 0, TAU, 14, STICK_RIM, 1.1, true)
+
+
+	func _sys_pill(p: Vector2) -> void:
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = STICK_FILL
+		sb.border_color = STICK_RIM
+		sb.set_border_width_all(1)
+		sb.set_corner_radius_all(6)
+		draw_style_box(sb, Rect2(p - Vector2(14, 7), Vector2(28, 14)))
+
+
+	func _draw_dpad() -> void:
+		# Continuous cross (DualSense d-pad is one piece).
+		var c := P_DPAD
+		var arm := 15.0
+		var thick := 12.0
+		var col := STICK_FILL
+		var rim := STICK_RIM
+		# Vertical bar
+		draw_rect(Rect2(c.x - thick * 0.5, c.y - arm - thick * 0.5, thick, arm * 2 + thick), col)
+		draw_rect(Rect2(c.x - thick * 0.5, c.y - arm - thick * 0.5, thick, arm * 2 + thick), rim, false, 1.3)
+		# Horizontal bar
+		draw_rect(Rect2(c.x - arm - thick * 0.5, c.y - thick * 0.5, arm * 2 + thick, thick), col)
+		draw_rect(Rect2(c.x - arm - thick * 0.5, c.y - thick * 0.5, arm * 2 + thick, thick), rim, false, 1.3)
+		# Direction nubs
+		_glyph(c + Vector2(0, -arm + 2), "▲", FIXED_COLOR, 9)
+		_glyph(c + Vector2(0, arm - 1), "▼", FIXED_COLOR, 9)
+		_glyph(c + Vector2(-arm + 2, 1), "◀", FIXED_COLOR, 9)
+		_glyph(c + Vector2(arm - 2, 1), "▶", FIXED_COLOR, 9)
+
+
+	func _draw_face_buttons() -> void:
+		var c := P_FACE
+		var o := 22.0
+		var pts := [
+			{"p": c + Vector2(0, -o), "g": "△", "col": Color("6eb0f0")},
+			{"p": c + Vector2(o, 0), "g": "○", "col": Color("f07890")},
+			{"p": c + Vector2(-o, 0), "g": "□", "col": Color("e8c070")},
+			{"p": c + Vector2(0, o), "g": "✕", "col": Color("70e0a8")},
+		]
+		for b in pts:
+			draw_circle(b.p, 13, STICK_FILL)
+			draw_arc(b.p, 13, 0, TAU, 24, STICK_RIM, 1.4, true)
+			_glyph(b.p, b.g, b.col, 15)
+
+
+	func _draw_sticks() -> void:
+		for p in [P_LSTICK, P_RSTICK]:
+			# Outer well
+			draw_circle(p, 28, Color(0.09, 0.10, 0.12))
+			draw_arc(p, 28, 0, TAU, 32, BODY_EDGE_SOFT, 1.5, true)
+			# Cap
+			draw_circle(p, 22, STICK_FILL)
+			draw_arc(p, 22, 0, TAU, 28, STICK_RIM, 1.6, true)
+			# Concavity ring
+			draw_arc(p, 12, 0, TAU, 20, Color(0.30, 0.32, 0.36), 1.2, true)
+			draw_circle(p, 4, Color(0.28, 0.30, 0.34))
+
+
+	func _draw_speaker() -> void:
+		# DualSense speaker grille between the sticks.
+		var base := Vector2(CX, CY + 198)
+		for row in range(3):
+			for col in range(6):
+				var p := base + Vector2((col - 2.5) * 5.0, (row - 1) * 4.0)
+				draw_circle(p, 1.1, BODY_EDGE_SOFT)
+
+
+	func _glyph(p: Vector2, s: String, color: Color, size: int = 16) -> void:
 		var font := ThemeDB.fallback_font
-		draw_string(font, p + Vector2(-6, 6), glyph, HORIZONTAL_ALIGNMENT_CENTER, -1, 15, FIXED_COLOR)
-
-
-	func _glyph(p: Vector2, s: String, color: Color) -> void:
-		var font := ThemeDB.fallback_font
-		draw_string(font, p + Vector2(-7, 6), s, HORIZONTAL_ALIGNMENT_CENTER, -1, 18, color)
+		var w := font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+		draw_string(font, p + Vector2(-w * 0.5, size * 0.35), s,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)

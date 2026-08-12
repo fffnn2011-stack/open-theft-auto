@@ -12,6 +12,7 @@ var _radio_player: AudioStreamPlayer
 var _rocket_player: AudioStreamPlayer   # continuous ascent engine loop
 var _wind_player: AudioStreamPlayer     # continuous re-entry wind roar loop
 var _spacecraft_player: AudioStreamPlayer   # continuous spacecraft engine loop
+var _jet_player: AudioStreamPlayer          # continuous plane turbofan loop
 
 # Pre-baked streams
 var _s_hit: AudioStreamWAV
@@ -37,6 +38,9 @@ var _s_rocket_ignite: AudioStreamWAV
 var _s_rocket_loop: AudioStreamWAV
 var _s_wind_loop: AudioStreamWAV
 var _s_spacecraft_loop: AudioStreamWAV
+var _s_jet_loop: AudioStreamWAV     # turbofan whine + roar (see _jet_loop)
+var _s_crash: AudioStreamWAV        # heavy airframe impact / scrape
+var _s_gear: AudioStreamWAV         # landing-gear servo whirr + clunk
 
 func _ready() -> void:
 	for i in 20:
@@ -54,6 +58,9 @@ func _ready() -> void:
 	_s_rocket_loop = _rocket_rumble(1.4, 0.85)
 	_s_wind_loop = _wind_noise(1.0, 0.8)
 	_s_spacecraft_loop = _spacecraft_hum(1.3, 0.8)
+	_s_jet_loop = _jet_loop(1.2, 0.82)
+	_s_crash = _metal_crash(0.9, 0.95)
+	_s_gear = _gear_whirr(1.0, 0.6)
 	_s_repulsor = _repulsor(0.22, 0.7)
 	_s_missile = _missile_launch(0.5, 0.9)
 
@@ -92,6 +99,9 @@ func _ready() -> void:
 	_spacecraft_player = AudioStreamPlayer.new()
 	add_child(_spacecraft_player)
 	_spacecraft_player.stream = _s_spacecraft_loop
+	_jet_player = AudioStreamPlayer.new()
+	add_child(_jet_player)
+	_jet_player.stream = _s_jet_loop
 
 
 ## A WAV that loops forward forever — for ambience and the radio.
@@ -247,6 +257,80 @@ func _spacecraft_hum(dur: float, vol: float) -> AudioStreamWAV:
 		var s := tone * 0.75 + lp * 0.5
 		data.encode_s16(i * 2, int(clamp(s * vol, -1.0, 1.0) * 32767.0))
 	return _loop_wav(data)
+
+
+## A turbofan loop for the plane — a detuned high turbine whine over a fan
+## fundamental and a deep low-passed roar. Unmistakably a JET: the whine is
+## what a rocket rumble and the sci-fi spacecraft hum both lack, and
+## jet_engine_set() pitch-sweeps the whole loop so spool-up sounds like a
+## real N1 climb. Tone frequencies complete whole cycles over `dur` so the
+## buffer loops without a click.
+func _jet_loop(dur: float, vol: float) -> AudioStreamWAV:
+	var n := int(MIX_RATE * dur)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var hiss := 0.0
+	var roar := 0.0
+	var pa := 0.0
+	var pb := 0.0
+	var pc := 0.0
+	for i in n:
+		pa += 620.0 / MIX_RATE          # turbine whine...
+		pb += 630.0 / MIX_RATE          # ...detuned pair, slow shimmer
+		pc += 210.0 / MIX_RATE          # fan fundamental
+		var whine := (sin(pa * TAU) + sin(pb * TAU)) * 0.5
+		var fan := sin(pc * TAU)
+		var white := randf() * 2.0 - 1.0
+		hiss += (white - hiss) * 0.16   # bright compressor hiss
+		roar += (white - roar) * 0.035  # deep combustor roar
+		var s := whine * 0.28 + fan * 0.16 + hiss * 0.2 + roar * 0.66
+		data.encode_s16(i * 2, int(clamp(s * vol, -1.0, 1.0) * 32767.0))
+	return _loop_wav(data)
+
+
+## A heavy airframe crash — a falling impact thump under a juddering
+## metal-scrape layer with a debris tail. Nothing tonal or beepy about it.
+func _metal_crash(dur: float, vol: float) -> AudioStreamWAV:
+	var n := int(MIX_RATE * dur)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var lp := 0.0
+	var phase := 0.0
+	for i in n:
+		var t := float(i) / float(n)
+		var f := 28.0 + 120.0 * pow(1.0 - t, 1.6)     # impact pitch falls fast
+		phase += f / MIX_RATE
+		var thump := sin(phase * TAU) * pow(1.0 - t, 2.2)
+		var white := randf() * 2.0 - 1.0
+		lp += (white - lp) * 0.3
+		var judder := 0.55 + 0.45 * sin(t * 90.0)     # tearing-metal stutter
+		var scrape := lp * pow(1.0 - t, 1.2) * judder
+		var s := thump * 0.95 + scrape * 0.6
+		data.encode_s16(i * 2, int(clamp(s * vol, -1.0, 1.0) * 32767.0))
+	return _wav(data)
+
+
+## Landing-gear cycle — a steady hydraulic motor whirr that ends in a solid
+## lock clunk over the last tenth of the buffer.
+func _gear_whirr(dur: float, vol: float) -> AudioStreamWAV:
+	var n := int(MIX_RATE * dur)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var lp := 0.0
+	var phase := 0.0
+	var clunk_phase := 0.0
+	for i in n:
+		var t := float(i) / float(n)
+		phase += 84.0 / MIX_RATE
+		var motor := (2.0 * fmod(phase, 1.0) - 1.0) * 0.4      # saw motor buzz
+		var white := randf() * 2.0 - 1.0
+		lp += (white - lp) * 0.12
+		var s := (motor + lp * 0.35) * minf(t * 8.0, 1.0)      # soft attack
+		if t > 0.88:
+			clunk_phase += 62.0 / MIX_RATE
+			s += sin(clunk_phase * TAU) * (1.0 - t) * 8.0 * 0.9  # lock thud
+		data.encode_s16(i * 2, int(clamp(s * vol, -1.0, 1.0) * 32767.0))
+	return _wav(data)
 
 
 func _noise(dur: float, vol: float) -> AudioStreamWAV:
@@ -542,6 +626,36 @@ func spacecraft_engine_set(thrust: float, fade: float) -> void:
 func spacecraft_engine_stop() -> void:
 	if _spacecraft_player.playing:
 		_spacecraft_player.stop()
+
+
+## Drive the plane's turbofan loop — auto-starts on first call, so callers
+## just feed it throttle (0..1) and speed fraction (0..1) every frame. The
+## pitch sweep with throttle is the spool-up; speed adds a little airflow
+## brightness on top.
+func jet_engine_set(throttle: float, speed_frac: float) -> void:
+	if _muted:
+		jet_engine_stop()
+		return
+	if not _jet_player.playing:
+		_jet_player.volume_db = -60.0
+		_jet_player.play()
+	var t := clampf(throttle, 0.0, 1.0)
+	var s := clampf(speed_frac, 0.0, 1.0)
+	_jet_player.volume_db = lerpf(-38.0, -5.0, maxf(t, s * 0.45))
+	_jet_player.pitch_scale = 0.55 + t * 0.85 + s * 0.15
+
+## Stop the turbofan loop — idempotent.
+func jet_engine_stop() -> void:
+	if _jet_player.playing:
+		_jet_player.stop()
+
+## Heavy airframe impact — plane collisions and belly landings.
+func crash_metal() -> void:
+	_play(_s_crash, -2.0)
+
+## Landing-gear servo cycle (retract or extend).
+func gear_whirr() -> void:
+	_play(_s_gear, -9.0)
 
 ## Splashdown — a splash plus a low thump as the capsule settles.
 func splash() -> void:

@@ -164,6 +164,14 @@ func _close() -> void:
 
 func _on_action(idx: int) -> void:
 	if Garage.owns_vehicle(idx):
+		if Garage.is_impounded(idx):
+			# Seized by the city — pay the release fee instead of spawning.
+			if Garage.recover_vehicle(idx):
+				AudioFX.coin()
+			else:
+				AudioFX.hit()
+			_refresh()
+			return
 		spawn_requested.emit(idx)
 		_close()
 	else:
@@ -194,11 +202,18 @@ func _refresh() -> void:
 		var car: Dictionary = VehicleCatalog.LIST[i]
 		var r: Dictionary = _rows[i]
 		if Garage.owns_vehicle(i):
-			r.price.text = "OWNED"
-			r.price.add_theme_color_override("font_color", MONEY)
-			r.act.text = "SPAWN"
-			r.act.add_theme_color_override("font_color", AMBER)
-			r.act.disabled = false
+			if Garage.is_impounded(i):
+				r.price.text = "IMPOUNDED"
+				r.price.add_theme_color_override("font_color", Color("d05050"))
+				r.act.text = "RECOVER  $" + _commas(Garage.impound_fee(i))
+				r.act.add_theme_color_override("font_color", Color("d05050"))
+				r.act.disabled = GameState.money < Garage.impound_fee(i)
+			else:
+				r.price.text = "OWNED"
+				r.price.add_theme_color_override("font_color", MONEY)
+				r.act.text = "SPAWN"
+				r.act.add_theme_color_override("font_color", AMBER)
+				r.act.disabled = false
 		else:
 			r.price.text = "$" + _commas(car.price)
 			r.price.add_theme_color_override("font_color", GOLD)

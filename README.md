@@ -5,7 +5,7 @@ pure GDScript. Third-person: walk, drive, fly, shoot, invest and build a
 reputation in a procedural, Los-Angeles-style island city with a wanted/police
 system, a day/night cycle, a full economy, a wearable Iron-Man-style flight
 suit, an F1 circuit, and a Space Shuttle trip to the Moon from a hidden
-mountain facility. Playable end-to-end on **keyboard + mouse or a game
+wilderness facility. Playable end-to-end on **keyboard + mouse or a game
 controller**, with saved progress.
 
 > Open Theft Auto is an unofficial, fan-made homage. It is not affiliated with,
@@ -14,12 +14,12 @@ controller**, with saved progress.
 
 The city is split into districts: a **downtown** core of glassy skyscrapers, a
 mid-rise **commercial** ring, sprawling **residential villas** (each with a
-lawn, pool, garage and pitched roof), a leafy **hills** neighbourhood, green
-**parks** with ponds, and a north-south **river** crossed by bridges. Snow-capped
-mountains ring the horizon, an **airport island** and the **President's estate**
+lawn, pool, garage and pitched roof), green **parks** with ponds, and a
+north-south **river** crossed by bridges. Flat wooded wilderness surrounds the
+city, while an **airport island** and the **President's estate**
 sit off the coast across causeways, and the **Moon** hangs high above.
 
-Deep in the northern mountains — off the map, no waypoint, no minimap marker —
+Deep in the northern wilderness — off the map, no waypoint, no minimap marker —
 sits a hidden facility: a fenced compound with a hangar, a control tower and
 a rocket pad. Find it and two ways up are waiting: a real **Space Shuttle**
 stack (orbiter, external tank and twin solid boosters, all three modelled
@@ -115,7 +115,7 @@ A dedicated **melee** strike works with any loadout.
   out mid-air with a parachute (`F`).
 - **Helicopter** — a **UH-60 Black Hawk** on the airport helipad: vertical
   take-off, hover when you let go, `F` to bail with a chute.
-- **Space Shuttle to the Moon** — find the hidden mountain facility, board the
+- **Space Shuttle to the Moon** — find the hidden wilderness facility, board the
   Shuttle stack and ride the ascent (real booster separation around 520 m,
   then the external tank drops away on reaching space) through re-entry to a
   real low-gravity **lunar surface** (rolling craters, a moon buggy, Earth in

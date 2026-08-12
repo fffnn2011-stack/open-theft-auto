@@ -11,6 +11,9 @@ extends Node
 signal updated
 
 var owned_vehicles: Array[int] = []     # catalog indices the player owns
+var impounded: Array[int] = []          # owned cars seized by the city at high
+                                        # wanted — unusable until recovered for
+                                        # a fee at the dealership
 var suit_tier: int = 1                  # 1 Mark III · 2 Mark VI · 3 War Machine · 4 Hulkbuster
 var properties: Array[int] = []         # PropertyCatalog indices the player owns
 var active_property: int = -1           # owned property used as the respawn home (-1 = none)
@@ -21,6 +24,7 @@ func _ready() -> void:
 ## Wipe the garage — called at the start of every run.
 func reset() -> void:
 	owned_vehicles.clear()
+	impounded.clear()
 	suit_tier = 1
 	properties.clear()
 	active_property = -1
@@ -30,6 +34,43 @@ func reset() -> void:
 # ---------------- Vehicles ----------------
 func owns_vehicle(idx: int) -> bool:
 	return owned_vehicles.has(idx)
+
+
+func is_impounded(idx: int) -> bool:
+	return impounded.has(idx)
+
+
+## City seizure: move one random non-impounded owned car to the impound lot.
+## Returns the catalog index taken, or -1 if there was nothing to take.
+func impound_random_vehicle() -> int:
+	var takeable: Array[int] = []
+	for idx in owned_vehicles:
+		if not impounded.has(idx):
+			takeable.append(idx)
+	if takeable.is_empty():
+		return -1
+	var idx: int = takeable[randi() % takeable.size()]
+	impounded.append(idx)
+	updated.emit()
+	return idx
+
+
+## What the city charges to release a seized car — half its sticker price.
+func impound_fee(idx: int) -> int:
+	return int(VehicleCatalog.LIST[idx].price / 2.0)
+
+
+## Pay the impound fee and get car `idx` back. Returns true on success.
+func recover_vehicle(idx: int) -> bool:
+	if not impounded.has(idx):
+		return false
+	var fee := impound_fee(idx)
+	if GameState.money < fee:
+		return false
+	GameState.money -= fee
+	impounded.erase(idx)
+	updated.emit()
+	return true
 
 ## Buy car `idx` from the catalog. Deducts cash, records ownership.
 ## Returns true on success (affordable and not already owned).

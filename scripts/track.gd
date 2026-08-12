@@ -330,16 +330,36 @@ func _build_pits() -> void:
 
 # ---------------- Grandstands ----------------
 func _build_grandstand(at: Vector3, face_yaw: float) -> void:
-	var stand_m := Build.mat(Build.hex(0x6a6e78), 0.85)
-	var seat_m := Build.mat(Build.hex(0xb23a32), 0.8)
+	var stand_m := Build.facade(Build.hex(0x777d84), "stucco")
+	var seat_m := Build.cmat(Build.hex(0xb23a32), 0.8)
+	var steel := Build.cmat(Build.hex(0x353a40), 0.42, 0.7)
 	var fwd := Vector3(sin(face_yaw), 0, cos(face_yaw))
 	var side := Vector3(-fwd.z, 0, fwd.x)
 	for tier in 6:
-		var step := Build.box(22.0, 1.2, 2.4, stand_m if tier % 2 else seat_m)
-		var back: Vector3 = at - fwd * (tier * 2.0) + Vector3(0, tier * 1.2 + 0.6, 0)
-		step.position = back
+		# Build a continuous stepped concrete plinth under every row. The old
+		# thin slabs were technically at y=0 but read as a staircase floating in
+		# the grass because only three narrow legs were visible from the infield.
+		var support_h := 0.45 + tier * 1.2
+		var support := Build.box(22.0, support_h, 2.6,
+			Build.facade(Build.hex(0x666d74), "concrete"))
+		var back: Vector3 = at - fwd * (tier * 2.0)
+		support.position = back + Vector3(0, support_h / 2.0, 0)
+		support.rotation.y = face_yaw
+		add_child(support)
+		var step := Build.box(22.0, 0.34, 2.45, seat_m if tier % 2 else stand_m)
+		step.position = back + Vector3(0, support_h + 0.17, 0)
 		step.rotation.y = face_yaw
 		add_child(step)
+	# Visible steel legs and a light canopy stop the seating stack reading as a
+	# levitating staircase when viewed from the infield.
+	for sx in [-9.0, 0.0, 9.0]:
+		var leg := Build.box(0.45, 7.2, 0.45, steel)
+		leg.position = at - fwd * 10.5 + side * sx + Vector3(0, 3.6, 0)
+		add_child(leg)
+	var canopy := Build.box(23.5, 0.3, 7.0, Build.cmat(Build.hex(0xe6e8e9), 0.62, 0.15))
+	canopy.position = at - fwd * 9.4 + Vector3(0, 8.7, 0)
+	canopy.rotation.y = face_yaw
+	add_child(canopy)
 	_solid(at - fwd * 5.0, 22.0, 12.4, 7.4, face_yaw)
 
 
@@ -367,28 +387,36 @@ func _build_paddock() -> void:
 	paddock_pos = Vector3(base.x, 0.0, base.z)
 	var yaw := atan2(-inward.x, -inward.z)               # face the track
 
-	var apron := Build.box(34.0, 0.16, 24.0, Build.mat(Build.hex(0x3a3c42), 0.9))
+	var apron := Build.box(38.0, 0.18, 27.0, Build.cmat(Build.hex(0x41444a), 0.88))
 	apron.position = Vector3(base.x, 0.08, base.z)
 	apron.rotation.y = yaw
 	add_child(apron)
-	# Two-storey glass HQ.
-	var hall := Build.box(26.0, 9.0, 12.0, Build.mat(Build.hex(0x2c2f37), 0.4, 0.4))
-	hall.position = Vector3(base.x, 4.6, base.z)
+	# Grounded foundation and two-storey hospitality HQ.
+	var foundation := Build.box(27.2, 0.7, 13.2, Build.facade(Build.hex(0xbfc2c4), "stucco"))
+	foundation.position = Vector3(base.x, 0.35, base.z)
+	foundation.rotation.y = yaw
+	add_child(foundation)
+	var hall := Build.box(26.0, 8.6, 12.0, Build.facade(Build.hex(0x343941), "stucco"))
+	hall.position = Vector3(base.x, 5.0, base.z)
 	hall.rotation.y = yaw
 	add_child(hall)
-	_solid(Vector3(base.x, 0.0, base.z), 26.0, 12.0, 9.0, yaw)
+	_solid(Vector3(base.x, 0.0, base.z), 27.2, 13.2, 9.3, yaw)
 	var glassrow := Build.mat(Build.hex(0x2a4255), 0.1, 0.5)
 	glassrow.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	glassrow.albedo_color.a = 0.55
 	var glass := Build.box(24.0, 4.4, 0.4, glassrow)
-	glass.position = base + Vector3(0, 4.2, 0) - Vector3(sin(yaw), 0, cos(yaw)) * 6.1
+	glass.position = base + Vector3(0, 4.8, 0) - Vector3(sin(yaw), 0, cos(yaw)) * 6.08
 	glass.rotation.y = yaw
 	add_child(glass)
 	var fascia := Build.emissive(Build.hex(0x1a1305), Color("ffd45a"), 2.2)
-	var band := Build.box(26.0, 1.8, 0.4, fascia)
-	band.position = base + Vector3(0, 9.6, 0) - Vector3(sin(yaw), 0, cos(yaw)) * 6.0
+	var band := Build.box(26.0, 1.45, 0.4, fascia)
+	band.position = base + Vector3(0, 8.55, 0) - Vector3(sin(yaw), 0, cos(yaw)) * 6.05
 	band.rotation.y = yaw
 	add_child(band)
+	var roof := Build.box(27.6, 0.45, 13.6, Build.cmat(Build.hex(0x171a1f), 0.64, 0.35))
+	roof.position = Vector3(base.x, 9.52, base.z)
+	roof.rotation.y = yaw
+	add_child(roof)
 	var sign := Label3D.new()
 	sign.text = "GRAND PRIX PADDOCK"
 	sign.font_size = 84
@@ -396,8 +424,24 @@ func _build_paddock() -> void:
 	sign.modulate = Color("1a1305")
 	sign.outline_size = 0
 	sign.rotation.y = yaw + PI
-	sign.position = base + Vector3(0, 9.6, 0) - Vector3(sin(yaw), 0, cos(yaw)) * 6.25
+	sign.position = base + Vector3(0, 8.55, 0) - Vector3(sin(yaw), 0, cos(yaw)) * 6.28
 	add_child(sign)
+	# Entrance canopy, columns and doors visibly connect the building to apron.
+	var front := -Vector3(sin(yaw), 0, cos(yaw))
+	var side := Vector3(-front.z, 0, front.x)
+	var canopy := Build.box(9.0, 0.32, 3.2, Build.cmat(Build.hex(0xd8dade), 0.56, 0.25))
+	canopy.position = base + front * 7.2 + Vector3(0, 3.25, 0)
+	canopy.rotation.y = yaw
+	add_child(canopy)
+	for sx in [-3.8, 3.8]:
+		var column := Build.box(0.45, 3.2, 0.45, Build.cmat(Build.hex(0x9ba0a4), 0.42, 0.65))
+		column.position = base + front * 8.25 + side * sx + Vector3(0, 1.6, 0)
+		add_child(column)
+	for sx in [-1.2, 1.2]:
+		var door := Build.box(2.1, 2.8, 0.18, glassrow)
+		door.position = base + front * 6.12 + side * sx + Vector3(0, 1.75, 0)
+		door.rotation.y = yaw
+		add_child(door)
 	# A glowing entry marker on the apron — drive the F1 here to enter.
 	var ring := Build.emissive(Build.hex(0x1a1305), Color("ffd45a"), 2.4)
 	var disc := Build.cyl(4.5, 4.5, 0.1, 28, ring)
@@ -479,11 +523,10 @@ func grid_yaw() -> float:
 func _build_estate() -> void:
 	var ex := ESTATE.x
 	var ez := ESTATE.y
-	var wall_m := Build.mat(Build.hex(0xeceef0), 0.6)
+	var wall_m := Build.facade(Build.hex(0xeceef0), "stucco")
 	var glass_m := Build.mat(Build.hex(0x1f2c3a), 0.12, 0.5)
 	var roof_m := Build.mat(Build.hex(0x33363d), 0.8)
 	var lawn_m := Build.mat(Build.hex(0x5f7a44), 0.95)
-	var water_m := Build.mat(Build.hex(0x2f8fb0), 0.15, 0.35)
 	var pave_m := Build.mat(Build.hex(0xb7b2a6), 0.9)
 
 	var lawn := Build.box(70.0, 0.14, 54.0, lawn_m)
@@ -528,9 +571,34 @@ func _build_estate() -> void:
 	var deck := Build.box(20.0, 0.16, 12.0, pave_m)
 	deck.position = Vector3(ex + 16.0, 0.13, ez - 2.0)
 	add_child(deck)
-	var pool := Build.box(14.0, 0.34, 7.0, water_m)
-	pool.position = Vector3(ex + 16.0, 0.26, ez - 2.0)
-	add_child(pool)
+	var basin := Build.box(14.0, 0.4, 7.0, Build.cmat(Build.hex(0x17657b), 0.35))
+	basin.position = Vector3(ex + 16.0, 0.02, ez - 2.0)
+	add_child(basin)
+	var pool_water := Build.water_plane(13.5, 6.5)
+	pool_water.position = Vector3(ex + 16.0, 0.25, ez - 2.0)
+	add_child(pool_water)
+	var coping := Build.cmat(Build.hex(0xd9d2c2), 0.78)
+	for px in [ex + 8.8, ex + 23.2]:
+		var edge := Build.box(0.4, 0.2, 7.8, coping)
+		edge.position = Vector3(px, 0.25, ez - 2.0)
+		add_child(edge)
+	for pz in [ez - 5.7, ez + 1.7]:
+		var edge := Build.box(14.8, 0.2, 0.4, coping)
+		edge.position = Vector3(ex + 16.0, 0.25, pz)
+		add_child(edge)
+	# Glass safety fence with a gate toward the deck.
+	var pool_glass := Build.mat(Build.hex(0xa8d7df), 0.08, 0.1)
+	pool_glass.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	pool_glass.albedo_color.a = 0.24
+	for spec in [
+		{"x": ex + 16.0, "z": ez - 6.9, "w": 17.0, "d": 0.1},
+		{"x": ex + 16.0, "z": ez + 2.9, "w": 17.0, "d": 0.1},
+		{"x": ex + 7.5, "z": ez - 2.0, "w": 0.1, "d": 9.8},
+		{"x": ex + 24.5, "z": ez - 0.8, "w": 0.1, "d": 7.4},
+	]:
+		var fence := Build.box(spec.w, 1.5, spec.d, pool_glass)
+		fence.position = Vector3(spec.x, 1.0, spec.z)
+		add_child(fence)
 
 	# Security gate + sign facing the estate's driveway.
 	for px in [-6.0, 6.0]:
@@ -558,7 +626,7 @@ func _build_estate() -> void:
 
 
 ## True if (x, z) lies within `margin` of the track (or the estate grounds) —
-## used to keep mountains, hills and trees from spawning on the circuit.
+## used to keep wilderness scenery from spawning on the circuit.
 func near(x: float, z: float, margin: float) -> bool:
 	if Vector2(ESTATE.x - x, ESTATE.y - z).length() < margin + 32.0:
 		return true

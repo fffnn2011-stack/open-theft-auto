@@ -41,6 +41,13 @@ var _minimap: Minimap
 var _speedo: Speedometer
 var _speedo_panel: PanelContainer
 var _race_panel: PanelContainer
+var _nav_panel: PanelContainer
+var _nav_body: Label
+var _nav_alt: Label
+var _nav_earth: Label
+var _nav_moon: Label
+var _nav_cargo: Label
+var _nav_hint: Label
 var _race_pos: Label
 var _race_lap: Label
 var _race_time: Label
@@ -598,6 +605,32 @@ func _build_hud() -> void:
 	_race_panel.visible = false
 	_hud.add_child(_race_panel)
 
+	# Spacecraft nav panel — top-right (same slot as the race panel; you can't
+	# be lapping the circuit and flying to the Moon at once), fed every frame
+	# by set_space_nav() while the spacecraft is being flown.
+	var nav_box := VBoxContainer.new()
+	nav_box.add_theme_constant_override("separation", 2)
+	nav_box.add_child(_label("SPACECRAFT NAV", 11, FAINT))
+	_nav_body = _label("EARTH — LANDED", 19, ACCENT)
+	nav_box.add_child(_nav_body)
+	_nav_alt = _label("ALT  0 m", 26, TEXT)
+	nav_box.add_child(_nav_alt)
+	_nav_earth = _label("EARTH  0 km", 13, MONEY)
+	nav_box.add_child(_nav_earth)
+	_nav_moon = _label("MOON  384,400 km", 13, GOLD)
+	nav_box.add_child(_nav_moon)
+	_nav_cargo = _label("", 13, MONEY)
+	nav_box.add_child(_nav_cargo)
+	_nav_hint = _label("", 12, FAINT)
+	nav_box.add_child(_nav_hint)
+	_nav_panel = _panel(nav_box)
+	_nav_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_nav_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_nav_panel.offset_right = -16
+	_nav_panel.offset_top = 68
+	_nav_panel.visible = false
+	_hud.add_child(_nav_panel)
+
 	# Notification toasts — a bottom-centre stack of cards. Newest sits at the
 	# bottom (nearest the anchor); older cards rise above it and fade out. Built
 	# by show_objective()/_add_toast(); the container just lays them out.
@@ -832,6 +865,25 @@ func update_hud(data: Dictionary) -> void:
 		_race_time.text = data.lap_time
 		_race_best.text = "BEST  " + str(data.best_lap)
 		_race_drift.text = "DRIFT  " + _commas(int(data.drift))
+
+
+## Live spacecraft navigation readout — game.gd feeds this every frame while
+## the spacecraft is flown ({title, alt_m, earth_km, moon_km, hint}) and
+## passes an empty dict to hide it again.
+func set_space_nav(nav: Dictionary) -> void:
+	if nav.is_empty():
+		_nav_panel.visible = false
+		return
+	_nav_panel.visible = true
+	_nav_body.text = nav.title
+	_nav_alt.text = "ALT  %s m" % _commas(int(nav.alt_m))
+	_nav_earth.text = "EARTH  %s km" % _commas(int(nav.earth_km))
+	_nav_moon.text = "MOON  %s km" % _commas(int(nav.moon_km))
+	var cargo: float = nav.get("cargo_kg", 0.0)
+	_nav_cargo.text = "CARGO  %d kg He-3" % int(cargo)
+	_nav_cargo.visible = cargo > 0.0
+	_nav_hint.text = nav.hint
+	_nav_hint.visible = nav.hint != ""
 
 ## Group digits with thousands separators: 70991741333 -> "70,991,741,333".
 func _commas(value: int) -> String:

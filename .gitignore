@@ -4,3 +4,4 @@
 
 # Exported builds
 /build/
+.vercel
